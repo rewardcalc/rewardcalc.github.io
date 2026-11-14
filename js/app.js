@@ -92,9 +92,24 @@ function analyzeBlob(blob) {
 
 /* ---------- 알림 ---------- */
 let toastTimer;
-function toast(msg) {
-  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2800);
+function toast(msg, opts = {}) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show'); t.classList.toggle('warn', !!opts.warn);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), opts.ms || 2800);
+}
+
+// 사진에서 가려진 곳이 있으면 다시 찍어 달라는 문구
+function warnMessage(r) {
+  const w = r && r.warn; if (!w) return '';
+  const parts = [];
+  if (w.covered) parts.push(`인벤토리 칸 ${w.covered}개`);
+  if (w.items) parts.push(`아이템 ${w.items}개`);
+  if (w.counts) parts.push(`아이템 개수 숫자 ${w.counts}곳`);
+  if (w.meso) parts.push('메소 칸');
+  if (!parts.length && !w.cursor) return '';
+  const who = w.cursor ? '마우스 커서가 인벤토리를 가리고 있어요' : '무언가에 가려서 읽지 못한 곳이 있어요';
+  const what = parts.length ? ` (${parts.join(', ')})` : '';
+  const fix = w.cursor ? '커서를 인벤토리 밖으로 옮기고' : '마우스 커서나 다른 창을 치우고';
+  return `${who}${what}. ${fix} 다시 캡처해 주세요.`;
 }
 
 /* ---------- 다크 모드 ---------- */
@@ -143,16 +158,19 @@ async function addFiles(side, files) {
   const list = [...files].filter(f => f.type && f.type.startsWith('image/'));
   if (!list.length) { toast('이미지 파일만 올릴 수 있어요.'); return; }
   setActive(side);
-  const msgs = [];
+  const msgs = [], added = [];
   for (const f of list) {
     const entry = { id: uid(), name: f.name || '붙여넣은 이미지', dataURL: null, kind: null, _blob: f };
-    cur[side].images.push(entry);
+    cur[side].images.push(entry); added.push(entry);
     await runAnalysis(entry);
     if (replaceSameKind(side, entry)) msgs.push(`${SIDE_KO[side]} ${KIND_KO[kindOf(entry)]} 사진을 새 사진으로 바꿨어요.`);
   }
   saveCur();
   render();
-  if (msgs.length) toast(msgs[msgs.length - 1]);
+  // 가려진 곳이 있으면 아래에 잠시 빨간 알림
+  const warned = added.map(im => warnMessage(results.get(im.id))).find(Boolean);
+  if (warned) toast(warned, { warn: true, ms: 6000 });
+  else if (msgs.length) toast(msgs[msgs.length - 1]);
   else if (side === 'before' && !cur.after.images.length) toast('사냥 전 사진을 넣었어요. 사냥이 끝나면 "사냥 후" 칸에 넣어 주세요.');
 }
 
@@ -278,6 +296,11 @@ function setActive(side) {
 }
 
 function shotDesc(im) {
+  const d = shotDescBase(im), r = results.get(im.id);
+  if (!pending.has(im.id) && r && r.warn && Object.keys(r.warn).length && !d.warn) return { text: d.text + ' · 일부가 가려졌어요, 다시 캡처해 주세요', warn: true };
+  return d;
+}
+function shotDescBase(im) {
   if (pending.has(im.id)) return { text: '인식하는 중…' };
   const r = results.get(im.id);
   if (!r) return { text: '' };

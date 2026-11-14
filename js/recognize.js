@@ -157,7 +157,9 @@ export async function loadTemplates(icons, base = (typeof location !== 'undefine
   const icons_ = tIcons;
   for (const d of '0123456789') digits.push(makeTemplate(d, await load(abs(`assets/digit/${d}.png`))));
   const coin = makeTemplate('coin', await load(abs('assets/coin.png')));
-  const tpl = { icons: icons_, digits, coin };
+  const cursors = [];
+  for (const c of ['normal', 'hover0', 'hover1', 'hover2', 'hover3', 'press', 'grab0', 'grab1', 'grab2']) cursors.push(makeTemplate(c, await load(abs(`assets/cursor/${c}.png`))));
+  const tpl = { icons: icons_, digits, coin, cursors };
   tpl.colors = allPrimaryColors(tpl);
   return tpl;
 }
@@ -229,9 +231,10 @@ function findDigits(img, digits, buckets) {
 }
 
 /* ---------- 아이템 아이콘 ---------- */
-function findIcons(img, mask, icons, whiten, buckets) {
+// partial: 아이콘 일부만 보여도(가려짐) 찾기 — 경고용
+function findIcons(img, mask, icons, whiten, buckets, partial = false) {
   const { w, d } = img, found = [];
-  const minScore = whiten ? 0.88 : 0.9;
+  const minScore = partial ? 0.5 : whiten ? 0.88 : 0.9, maxMiss = partial ? 5 : 2;
   for (const t of icons) {
     const src = whiten ? t.quick : t, P = src.pts;
     // 대표 픽셀이 맞는 자리만 후보로
@@ -244,9 +247,9 @@ function findIcons(img, mask, icons, whiten, buckets) {
         chk++;
         const m = whiten ? sameOrWhitened(d, p * 4, P[k * 5 + 2], P[k * 5 + 3], P[k * 5 + 4])
                          : same(d, p * 4, P[k * 5 + 2], P[k * 5 + 3], P[k * 5 + 4]);
-        if (!m && ++miss > 2) break;
+        if (!m && ++miss > maxMiss) break;
       }
-      if (miss > 2 || chk < 3) continue;
+      if (miss > maxMiss || chk < 3) continue;
       const s = score(img, mask, t, x, y, minScore, whiten);
       if (s >= minScore) found.push({ icon: t.key, x, y, w: t.w, h: t.h, score: s });
     }
@@ -274,15 +277,93 @@ function findGrid(img) {
     }
   }
   if (!xs.size) return null;
-  const X = [...xs.keys()].sort((a, b) => a - b), Y = [...ys.keys()].sort((a, b) => a - b);
-  const cells = [];
+  // 칸 간격(가로 36 / 세로 34 정도)으로 사이에 빠진 줄을 채운다 → 무언가에 가려 모서리가 안 보이는 칸도 자리를 안다
+  const fill = (vals, lo, hi) => {
+    const v = [...vals].sort((a, b) => a - b), diffs = {};
+    for (let i = 1; i < v.length; i++) { const dd = v[i] - v[i - 1]; if (dd >= lo && dd <= hi) diffs[dd] = (diffs[dd] || 0) + 1; }
+    const step = +Object.keys(diffs).sort((a, b) => diffs[b] - diffs[a])[0];
+    if (!step) return v;
+    const out = [v[0]];
+    for (let i = 1; i < v.length; i++) {
+      const gap = v[i] - out[out.length - 1];
+      if (gap > step * 1.5) for (let k = 1; out[out.length - 1] + step < v[i] - step / 2 && k < 20; k++) out.push(out[out.length - 1] + step);
+      out.push(v[i]);
+    }
+    return out;
+  };
+  const X = fill(xs.keys(), 30, 45), Y = fill(ys.keys(), 28, 42);
+  const cells = []; let covered = 0;
   for (const y of Y) for (const x of X) {
     if (x + CELL > w || y + CELL > h) continue;
-    let bg = 0;
+    let bg = 0, border = 0;
     for (let yy = y; yy < y + CELL; yy += 2) for (let xx = x; xx < x + CELL; xx += 2) if (is(xx, yy, CELL_BG)) bg++;
+    for (let k = 0; k < CELL; k++) { if (is(x, y + k, CELL_BORDER)) border++; if (is(x + k, y, CELL_BORDER)) border++; }
     if (bg >= 25) cells.push({ x, y, w: CELL, h: CELL });
+    else if (border < 6) covered++; // 칸 바탕도 테두리도 안 보임 = 다른 창·커서 등에 가려짐
   }
-  return cells.length ? cells : null;
+  if (!cells.length) return null;
+  cells.covered = covered;
+  return cells;
+}
+
+// 칸 안에 바탕이 아닌 픽셀이 어느 정도 있으면 = 무언가 들어 있음
+function cellHasContent(img, mask, c) {
+  const { w, d } = img; let n = 0;
+  for (let y = c.y + 1; y < c.y + CELL; y++) for (let x = c.x + 1; x < c.x + CELL; x++) {
+    const p = y * w + x;
+    if (mask[p] || same(d, p * 4, ...CELL_BG, 6) || same(d, p * 4, ...CELL_BORDER, 6)) continue;
+    if (++n >= 40) return true;
+  }
+  return false;
+}
+// 칸 안 여러 위치에서 아는 아이콘과 일정 비율 이상 맞으면 = 그 아이템이 일부 가려진 것
+const PARTIAL_MIN = 0.35;
+function partialIconIn(img, mask, c, icons) {
+  const { w, h, d } = img;
+  for (const t of icons) {
+    const step = Math.max(1, Math.floor(t.n / 60)); // 60점 정도만 골라 빠르게 비교
+    const maxBad = Math.ceil(t.n / step * (1 - PARTIAL_MIN));
+    for (let oy = c.y - 4; oy <= c.y + 8; oy++) for (let ox = c.x - 4; ox <= c.x + 8; ox++) {
+      if (ox < 0 || oy < 0 || ox + t.w > w || oy + t.h > h) continue;
+      let ok = 0, seen = 0, bad = 0;
+      for (let k = 0; k < t.n; k += step) {
+        const p = (oy + t.pts[k * 5 + 1]) * w + ox + t.pts[k * 5];
+        if (mask[p]) continue;
+        seen++;
+        if (same(d, p * 4, t.pts[k * 5 + 2], t.pts[k * 5 + 3], t.pts[k * 5 + 4])) ok++; else if (++bad > maxBad) break;
+      }
+      if (bad <= maxBad && seen >= 25 && ok / seen >= PARTIAL_MIN) return true;
+    }
+  }
+  return false;
+}
+
+// 게임 마우스 커서가 사각형(인벤토리) 안에 찍혀 있는지 (커서는 캡처에 그대로 찍힌다)
+function cursorIn(img, cursors, r) {
+  const { w, h } = img;
+  for (const t of cursors) {
+    for (let y = Math.max(0, r.y0 - t.h); y <= Math.min(h - t.h, r.y1); y++) for (let x = Math.max(0, r.x0 - t.w); x <= Math.min(w - t.w, r.x1); x++) {
+      if (score(img, null, t, x, y, 0.85, false) >= 0.85) return true;
+    }
+  }
+  return false;
+}
+
+// 칸 왼쪽 아래(개수 숫자 자리)에 숫자가 일부만 보이면 = 숫자가 가려진 것
+function partialDigitIn(img, cell, digits) {
+  const { w, h, d } = img;
+  for (let y0 = cell.y + 14; y0 <= cell.y + 24; y0++) for (let x0 = cell.x - 1; x0 <= cell.x + 12; x0++) {
+    for (const t of digits) {
+      if (x0 < 0 || y0 < 0 || x0 + t.w > w || y0 + t.h > h) continue;
+      let ok = 0, bad = 0; const maxBad = t.n * 0.35;
+      for (let k = 0; k < t.n; k++) {
+        const p = ((y0 + t.pts[k * 5 + 1]) * w + x0 + t.pts[k * 5]) * 4;
+        if (same(d, p, t.pts[k * 5 + 2], t.pts[k * 5 + 3], t.pts[k * 5 + 4], 8)) ok++; else if (++bad > maxBad) break;
+      }
+      if (bad <= maxBad && ok < t.n) return true;
+    }
+  }
+  return false;
 }
 
 /* ---------- 메소 ---------- */
@@ -367,7 +448,7 @@ export function analyze(img, tpl) {
   const known = inCells.map(f => {
     const cell = cellOf(f);
     const n = runFor(f, cell);
-    return { icon: f.icon, count: n == null ? 1 : n, box: cell || f };
+    return { icon: f.icon, count: n == null ? 1 : n, box: cell || f, noDigits: n == null };
   });
 
   // 화면 전체 캡처처럼 인벤토리 밖에 퀵슬롯이 함께 찍힌 경우: 퀵슬롯 아이콘은 따로 모은다
@@ -390,7 +471,28 @@ export function analyze(img, tpl) {
   if (isInventory) kind = nEtc > nUse ? 'etc' : nUse ? 'use' : quick.length ? 'use' : 'unknown';
   else kind = nUse ? 'quick' : 'unknown';
   lap('quick');
-  return { kind, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, w: img.w, h: img.h, timings: T };
+
+  // 가려진 곳 찾기 (다시 캡처해 달라고 알려 주기 위해)
+  const warn = {};
+  if (isInventory) {
+    if (!coin) warn.meso = 'hidden';               // 동전·메소 칸이 안 보임
+    else if (meso == null) warn.meso = 'unreadable'; // 메소 숫자가 가려져 못 읽음
+    if (grid.covered) warn.covered = grid.covered;   // 칸 자체가 가려짐
+    const hiddenCounts = known.filter(k => k.noDigits && partialDigitIn(img, k.box, tpl.digits)).length;
+    if (hiddenCounts) warn.counts = hiddenCounts;   // 개수 숫자 일부가 가려짐
+    // 아는 아이템인데 아이콘 일부가 가려져서 못 찾은 칸
+    const taken = new Set(known.map(k => k.box));
+    const suspects = grid.filter(c => !taken.has(c) && cellHasContent(img, mask, c));
+    const hiddenItems = suspects.filter(c => partialIconIn(img, mask, c, tpl.icons)).length;
+    if (hiddenItems) warn.items = hiddenItems;
+    // 마우스 커서가 칸이나 메소 칸 위에 있으면 (숫자·아이콘을 가렸을 수 있음)
+    const gx0 = Math.min(...grid.map(c => c.x)), gy0 = Math.min(...grid.map(c => c.y));
+    const gx1 = Math.max(...grid.map(c => c.x + CELL)), gy1 = Math.max(...grid.map(c => c.y + CELL)) + 30;
+    if (tpl.cursors && cursorIn(img, tpl.cursors, { x0: gx0, y0: gy0, x1: gx1, y1: gy1 })) warn.cursor = true;
+  }
+  known.forEach(k => delete k.noDigits);
+  lap('warn');
+  return { kind, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn, w: img.w, h: img.h, timings: T };
 }
 
 /* ---------- 필요한 부분만 잘라 두기 ---------- */
@@ -412,7 +514,7 @@ function regionOf(r, W, H) {
   const parts = boxes.map(b => ({ x: Math.max(0, b.x0), y: Math.max(0, b.y0), x1: Math.min(W, b.x1), y1: Math.min(H, b.y1) }));
   return { x, y, w: x1 - x, h: y1 - y, parts };
 }
-const summary = r => JSON.stringify([r.kind, r.meso, r.known.map(k => k.icon + ':' + k.count).sort(), (r.quick || []).map(k => k.icon + ':' + k.count).sort()]);
+const summary = r => JSON.stringify([r.kind, r.meso, r.known.map(k => k.icon + ':' + k.count).sort(), (r.quick || []).map(k => k.icon + ':' + k.count).sort(), r.warn]);
 
 // 사진 한 장을 분석하고, 화면 전체 캡처라면 필요한 부분만 잘라낸 PNG도 돌려준다.
 // 잘라낸 사진을 다시 분석해서 결과가 똑같을 때만 잘라낸 것을 쓴다.

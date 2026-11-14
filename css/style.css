@@ -240,6 +240,7 @@ details.more summary { color: var(--muted); font-size: 13.5px; padding: 6px 0; }
 /* toast */
 #toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); background: var(--toast); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px; opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; z-index: 50; max-width: calc(100vw - 32px); }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
+#toast.warn { background: var(--bad); color: #fff; font-weight: 600; max-width: min(560px, calc(100vw - 32px)); text-align: center; }
 
 /* game cursor */
 html.game-cursor, html.game-cursor * { cursor: none !important; }
