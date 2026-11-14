@@ -30,14 +30,20 @@ const GULIM = {
 };
 
 /* ---------- 이미지 → 픽셀 ---------- */
-export async function pixelsFromSource(src) {
-  const blob = src instanceof Blob ? src : await (await fetch(src)).blob();
-  const bmp = await createImageBitmap(blob);
-  const w = bmp.width, h = bmp.height;
-  const c = document.createElement('canvas'); c.width = w; c.height = h;
+// 화면(main)과 백그라운드 작업(worker) 어디서든 쓸 수 있는 캔버스
+export function makeCanvas(w, h) {
+  if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
+  const c = document.createElement('canvas'); c.width = w; c.height = h; return c;
+}
+export function bitmapPixels(bmp) {
+  const w = bmp.width, h = bmp.height, c = makeCanvas(w, h);
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0);
   return { w, h, d: ctx.getImageData(0, 0, w, h).data };
+}
+export async function pixelsFromSource(src) {
+  const blob = src instanceof Blob ? src : await (await fetch(src)).blob();
+  return bitmapPixels(await createImageBitmap(blob));
 }
 
 function makeTemplate(key, px) {
@@ -70,8 +76,9 @@ function pickPrimary(P, n, prefer) {
   for (let k = 0; k < n; k++) {
     const x = P[k * 5], y = P[k * 5 + 1], r = P[k * 5 + 2], g = P[k * 5 + 3], b = P[k * 5 + 4];
     const lum = (r + g + b) / 3;
-    if (lum < 35 || lum > 235) continue;
-    c.push({ k, x, y, s: Math.max(r, g, b) - Math.min(r, g, b) + (prefer(x, y) ? 100 : 0) });
+    if (lum < 35) continue; // 검은 테두리는 어디에나 있어서 후보가 너무 많아진다
+    // 채도가 높을수록, 아주 밝은 색(흰색)은 낮게
+    c.push({ k, x, y, s: Math.max(r, g, b) - Math.min(r, g, b) + (prefer(x, y) ? 100 : 0) - (lum > 235 ? 200 : 0) });
   }
   c.sort((a, b) => b.s - a.s);
   const out = [];
@@ -98,17 +105,49 @@ function colorBuckets(img, colors) {
     }
   }
   const { w, h, d } = img, N = w * h;
+  // 32단계로 묶은 색마다 바로 찾을 수 있게 표(32768칸)를 만들어 Map 조회를 피한다
+  const want = new Uint8Array(32768);
+  for (const k of map.keys()) want[k] = 1;
   for (let p = 0; p < N; p++) {
-    const arr = map.get(qkey(d[p * 4], d[p * 4 + 1], d[p * 4 + 2]));
-    if (arr) arr.push(p);
+    const k = qkey(d[p * 4], d[p * 4 + 1], d[p * 4 + 2]);
+    if (want[k]) map.get(k).push(p);
   }
   return map;
 }
 
+// 템플릿 t(또는 그 일부 src)의 대표 픽셀이 맞는 자리만 후보로 돌려준다 (왼쪽 위 기준 위치 = y*w+x)
+function candidates(img, buckets, t, src, tol = TOL) {
+  const { w, h, d } = img, P = src.pts, cand = new Set();
+  for (const a of src.primary) {
+    const r = P[a * 5 + 2], g = P[a * 5 + 3], b = P[a * 5 + 4], R = r >> 3, G = g >> 3, B = b >> 3;
+    for (let dr = -1; dr <= 1; dr++) for (let dg = -1; dg <= 1; dg++) for (let db = -1; db <= 1; db++) {
+      const list = buckets.get(((R + dr) << 10) | ((G + dg) << 5) | (B + db));
+      if (!list) continue;
+      for (const p of list) {
+        if (!same(d, p * 4, r, g, b, tol)) continue;
+        const ox = (p % w) - P[a * 5], oy = ((p / w) | 0) - P[a * 5 + 1];
+        if (ox >= 0 && oy >= 0 && ox + t.w <= w && oy + t.h <= h) cand.add(oy * w + ox);
+      }
+    }
+  }
+  return cand;
+}
+// 분석 한 번에 필요한 모든 대표 색을 모아 한 번만 훑는다
+function allPrimaryColors(tpl) {
+  const cols = [];
+  const add = s => s.primary.forEach(k => cols.push(s.pts.slice(k * 5 + 2, k * 5 + 5)));
+  for (const t of tpl.icons) { add(t); add(t.quick); }
+  for (const t of tpl.digits) add(t);
+  add(tpl.coin);
+  return cols;
+}
+
 /* ---------- 템플릿 준비 ---------- */
 // icons: [{ key, url }] — key는 인식 결과에 그대로 돌려준다
-export async function loadTemplates(icons) {
+// base: 숫자·동전 이미지 경로의 기준 주소 (백그라운드 작업에서도 같은 곳을 가리키도록)
+export async function loadTemplates(icons, base = (typeof location !== 'undefined' ? location.href : '')) {
   const load = async url => { try { return await pixelsFromSource(url); } catch (e) { return await pixelsFromSource(url + '?r=1'); } };
+  const abs = p => new URL(p, base).href;
   // 작은 이미지 100여 개를 16개씩 동시에 불러온다
   const tIcons = [], digits = [];
   for (let i = 0; i < icons.length; i += 16) {
@@ -116,9 +155,11 @@ export async function loadTemplates(icons) {
     tIcons.push(...batch);
   }
   const icons_ = tIcons;
-  for (const d of '0123456789') digits.push(makeTemplate(d, await load(`assets/digit/${d}.png`)));
-  const coin = makeTemplate('coin', await load('assets/coin.png'));
-  return { icons: icons_, digits, coin };
+  for (const d of '0123456789') digits.push(makeTemplate(d, await load(abs(`assets/digit/${d}.png`))));
+  const coin = makeTemplate('coin', await load(abs('assets/coin.png')));
+  const tpl = { icons: icons_, digits, coin };
+  tpl.colors = allPrimaryColors(tpl);
+  return tpl;
 }
 
 /* ---------- 픽셀 비교 ---------- */
@@ -157,10 +198,11 @@ function score(img, mask, t, ox, oy, minScore, whiten) {
 }
 
 /* ---------- 개수 숫자 ---------- */
-function findDigits(img, digits) {
+function findDigits(img, digits, buckets) {
   const { w, h, d } = img, hits = [];
   for (const t of digits) {
-    for (let y = 0; y + t.h <= h; y++) for (let x = 0; x + t.w <= w; x++) {
+    for (const o of candidates(img, buckets, t, t, 8)) {
+      const x = o % w, y = (o / w) | 0;
       let k = 0;
       for (; k < t.n; k++) {
         const p = ((y + t.pts[k * 5 + 1]) * w + x + t.pts[k * 5]) * 4;
@@ -187,28 +229,13 @@ function findDigits(img, digits) {
 }
 
 /* ---------- 아이템 아이콘 ---------- */
-function findIcons(img, mask, icons, whiten) {
-  const { w, h, d } = img, found = [];
+function findIcons(img, mask, icons, whiten, buckets) {
+  const { w, d } = img, found = [];
   const minScore = whiten ? 0.88 : 0.9;
-  const srcOf = t => whiten ? t.quick : t;
-  const buckets = colorBuckets(img, icons.flatMap(t => { const s = srcOf(t); return s.primary.map(k => s.pts.slice(k * 5 + 2, k * 5 + 5)); }));
   for (const t of icons) {
-    const src = srcOf(t), P = src.pts;
+    const src = whiten ? t.quick : t, P = src.pts;
     // 대표 픽셀이 맞는 자리만 후보로
-    const cand = new Set();
-    for (const a of src.primary) {
-      const r = P[a * 5 + 2], g = P[a * 5 + 3], b = P[a * 5 + 4], R = r >> 3, G = g >> 3, B = b >> 3;
-      for (let dr = -1; dr <= 1; dr++) for (let dg = -1; dg <= 1; dg++) for (let db = -1; db <= 1; db++) {
-        const list = buckets.get(((R + dr) << 10) | ((G + dg) << 5) | (B + db));
-        if (!list) continue;
-        for (const p of list) {
-          if (!same(d, p * 4, r, g, b)) continue;
-          const ox = (p % w) - P[a * 5], oy = ((p / w) | 0) - P[a * 5 + 1];
-          if (ox >= 0 && oy >= 0 && ox + t.w <= w && oy + t.h <= h) cand.add(oy * w + ox);
-        }
-      }
-    }
-    for (const o of cand) {
+    for (const o of candidates(img, buckets, t, src)) {
       const x = o % w, y = (o / w) | 0;
       let chk = 0, miss = 0;
       for (const k of src.anchors) {
@@ -259,12 +286,14 @@ function findGrid(img) {
 }
 
 /* ---------- 메소 ---------- */
-function findCoin(img, coin) {
-  const { w, h } = img;
-  for (let y = h - coin.h; y >= 0; y--) for (let x = 0; x + coin.w <= w; x++) {
-    if (score(img, null, coin, x, y, 0.95, false) >= 0.95) return { x, y };
+function findCoin(img, coin, buckets) {
+  const { w } = img;
+  let best = null;
+  for (const o of candidates(img, buckets, coin, coin)) {
+    const x = o % w, y = (o / w) | 0;
+    if (score(img, null, coin, x, y, 0.95, false) >= 0.95 && (!best || y > best.y)) best = { x, y }; // 여러 개면 가장 아래쪽
   }
-  return null;
+  return best;
 }
 const GLYPHS = Object.entries(GULIM).map(([ch, rows]) => ({ ch, w: rows[0].length, h: rows.length, rows }));
 function readMeso(img, coin) {
@@ -306,11 +335,14 @@ function readMeso(img, coin) {
 // return { kind:'use'|'etc'|'quick'|'unknown', inventory, meso, known:[{icon,count,box}] }
 // 아이콘 key가 'e:'로 시작하면 기타 아이템, 그 밖은 소비 아이템
 export function analyze(img, tpl) {
-  const { runs, mask } = findDigits(img, tpl.digits);
-  const coin = findCoin(img, tpl.coin);
-  const grid = findGrid(img);
+  const T = {}, now = () => performance.now(); let t = now();
+  const lap = k => { const n = now(); T[k] = Math.round(n - t); t = n; };
+  const buckets = colorBuckets(img, tpl.colors); lap('buckets');
+  const { runs, mask } = findDigits(img, tpl.digits, buckets); lap('digits');
+  const coin = findCoin(img, tpl.coin, buckets); lap('coin');
+  const grid = findGrid(img); lap('grid');
   const isInventory = !!(grid && grid.length >= 4);
-  const icons = findIcons(img, mask, tpl.icons, !isInventory);
+  const icons = findIcons(img, mask, tpl.icons, !isInventory, buckets); lap('icons');
   const meso = coin ? readMeso(img, coin) : null;
 
   const usedRuns = new Set();
@@ -346,7 +378,7 @@ export function analyze(img, tpl) {
     const inside = b => b.x + b.w / 2 >= gx0 && b.x + b.w / 2 <= gx1 && b.y + b.h / 2 >= gy0 && b.y + b.h / 2 <= gy1;
     if ((gx1 - gx0) * (gy1 - gy0) < img.w * img.h * 0.6) {
       const useIcons = tpl.icons.filter(t => !String(t.key).startsWith('e:'));
-      quick = findIcons(img, mask, useIcons, true)
+      quick = findIcons(img, mask, useIcons, true, buckets)
         .filter(f => !inside(f))
         .map(f => { const n = runFor(f, null); return { icon: f.icon, count: n == null ? 1 : n, box: f }; });
     }
@@ -357,5 +389,52 @@ export function analyze(img, tpl) {
   let kind;
   if (isInventory) kind = nEtc > nUse ? 'etc' : nUse ? 'use' : quick.length ? 'use' : 'unknown';
   else kind = nUse ? 'quick' : 'unknown';
-  return { kind, inventory: isInventory, meso, known, quick, w: img.w, h: img.h };
+  lap('quick');
+  return { kind, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, w: img.w, h: img.h, timings: T };
+}
+
+/* ---------- 필요한 부분만 잘라 두기 ---------- */
+// 인벤토리 창(제목·탭·메소 칸 포함)과 퀵슬롯이 들어가는 사각형
+function regionOf(r, W, H) {
+  const boxes = [];
+  if (r.grid) {
+    const x0 = Math.min(...r.grid.map(c => c.x)), y0 = Math.min(...r.grid.map(c => c.y));
+    const x1 = Math.max(...r.grid.map(c => c.x + CELL)), y1 = Math.max(...r.grid.map(c => c.y + CELL));
+    boxes.push({ x0: x0 - 12, y0: y0 - 52, x1: x1 + 32, y1: y1 + 50 });
+  } else {
+    for (const k of r.known) boxes.push({ x0: k.box.x - 14, y0: k.box.y - 16, x1: k.box.x + k.box.w + 14, y1: k.box.y + k.box.h + 14 });
+  }
+  if (r.coin) boxes.push({ x0: r.coin.x - 6, y0: r.coin.y - 8, x1: r.coin.x + 200, y1: r.coin.y + 22 });
+  for (const k of r.quick || []) boxes.push({ x0: k.box.x - 14, y0: k.box.y - 16, x1: k.box.x + k.box.w + 14, y1: k.box.y + k.box.h + 14 });
+  if (!boxes.length) return null;
+  const x = Math.max(0, Math.min(...boxes.map(b => b.x0))), y = Math.max(0, Math.min(...boxes.map(b => b.y0)));
+  const x1 = Math.min(W, Math.max(...boxes.map(b => b.x1))), y1 = Math.min(H, Math.max(...boxes.map(b => b.y1)));
+  const parts = boxes.map(b => ({ x: Math.max(0, b.x0), y: Math.max(0, b.y0), x1: Math.min(W, b.x1), y1: Math.min(H, b.y1) }));
+  return { x, y, w: x1 - x, h: y1 - y, parts };
+}
+const summary = r => JSON.stringify([r.kind, r.meso, r.known.map(k => k.icon + ':' + k.count).sort(), (r.quick || []).map(k => k.icon + ':' + k.count).sort()]);
+
+// 사진 한 장을 분석하고, 화면 전체 캡처라면 필요한 부분만 잘라낸 PNG도 돌려준다.
+// 잘라낸 사진을 다시 분석해서 결과가 똑같을 때만 잘라낸 것을 쓴다.
+export async function processBlob(blob, tpl) {
+  const bmp = await createImageBitmap(blob);
+  const px = bitmapPixels(bmp);
+  const result = analyze(px, tpl);
+  let crop = null, out = result;
+  const reg = regionOf(result, px.w, px.h);
+  if (reg && reg.w > 0 && reg.h > 0 && reg.w * reg.h < px.w * px.h * 0.7) {
+    const c = makeCanvas(reg.w, reg.h), ctx = c.getContext('2d', { willReadFrequently: true });
+    // 인벤토리·퀵슬롯 부분만 옮기고 그 사이 배경은 단색으로 → PNG가 훨씬 작아진다
+    ctx.fillStyle = '#20252c'; ctx.fillRect(0, 0, reg.w, reg.h);
+    for (const p of reg.parts) ctx.drawImage(bmp, p.x, p.y, p.x1 - p.x, p.y1 - p.y, p.x - reg.x, p.y - reg.y, p.x1 - p.x, p.y1 - p.y);
+    const r2 = analyze({ w: reg.w, h: reg.h, d: ctx.getImageData(0, 0, reg.w, reg.h).data }, tpl);
+    if (summary(r2) === summary(result)) {
+      out = r2;
+      crop = c.convertToBlob ? await c.convertToBlob({ type: 'image/png' }) : await new Promise(res => c.toBlob(res, 'image/png'));
+    }
+  }
+  bmp.close && bmp.close();
+  // 화면 쪽으로 보낼 결과에서 큰 데이터는 뺀다
+  const { grid, ...rest } = out;
+  return { result: rest, crop, original: { w: px.w, h: px.h } };
 }

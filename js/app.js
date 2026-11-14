@@ -1,5 +1,5 @@
 import { ITEMS, ETC } from './items.js';
-import { loadTemplates, pixelsFromSource, analyze } from './recognize.js';
+import { loadTemplates, processBlob } from './recognize.js';
 import { initCursor } from './cursor.js';
 
 /* ---------- 도우미 ---------- */
@@ -54,15 +54,40 @@ let prices = store.get(K.prices, {});
 let eprices = store.get(K.eprices, {});
 const results = new Map();          // 이미지 id → 인식 결과
 const pending = new Set();          // 인식 중인 이미지 id
-let tplPromise = null;
-const templates = () => (tplPromise ||= loadTemplates(TEMPLATE_LIST));
 let activeSide = cur.before.images.length ? 'after' : 'before';
 
+// 저장할 때는 화면에서만 쓰는 값(_로 시작: 썸네일 주소, 사진 원본)은 뺀다
+const persistable = () => JSON.parse(JSON.stringify(cur, (k, v) => k.startsWith('_') ? undefined : v));
 function saveCur() {
-  if (!sess.set(K.cur, cur)) {
-    // 사진이 너무 크면 사진은 빼고 저장 (새로고침하면 다시 올려야 함)
-    sess.set(K.cur, { ...cur, before: { images: [] }, after: { images: [] } });
+  const data = persistable();
+  if (!sess.set(K.cur, data)) {
+    // 그래도 너무 크면 사진은 빼고 저장 (새로고침하면 다시 올려야 함)
+    sess.set(K.cur, { ...data, before: { images: [] }, after: { images: [] } });
   }
+}
+
+/* ---------- 사진 분석 (백그라운드 작업) ---------- */
+const ICON_URLS = TEMPLATE_LIST.map(t => ({ key: t.key, url: new URL(t.url, location.href).href }));
+let worker = null;
+const jobs = new Map(); let jobSeq = 0;
+try {
+  worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  worker.onmessage = e => { const j = jobs.get(e.data.id); if (!j) return; jobs.delete(e.data.id); e.data.error ? j.reject(new Error(e.data.error)) : j.resolve(e.data); };
+  worker.onerror = e => { console.warn('worker failed, falling back', e); worker = null; for (const j of jobs.values()) j.reject(new Error('worker')); jobs.clear(); };
+  worker.postMessage({ type: 'warm', icons: ICON_URLS, base: location.href }); // 아이콘 미리 받기
+} catch (e) { worker = null; }
+// 백그라운드 작업을 못 쓰는 브라우저에서는 화면 쪽에서 직접 분석
+let localTpl = null;
+async function analyzeHere(blob) {
+  localTpl ||= loadTemplates(ICON_URLS, location.href);
+  return processBlob(blob, await localTpl);
+}
+function analyzeBlob(blob) {
+  if (!worker) return analyzeHere(blob);
+  return new Promise((resolve, reject) => {
+    const id = ++jobSeq; jobs.set(id, { resolve, reject });
+    worker.postMessage({ id, blob, icons: ICON_URLS, base: location.href });
+  }).catch(() => analyzeHere(blob));
 }
 
 /* ---------- 알림 ---------- */
@@ -108,9 +133,11 @@ function replaceSameKind(side, im) {
   const old = cur[side].images.filter(x => x !== im && kindOf(x) === k);
   if (!old.length) return false;
   cur[side].images = cur[side].images.filter(x => !old.includes(x));
-  old.forEach(x => results.delete(x.id));
+  old.forEach(dropImage);
   return true;
 }
+function dropImage(im) { results.delete(im.id); if (im._url) URL.revokeObjectURL(im._url); }
+const thumbURL = im => im._url || (im._url = im._blob ? URL.createObjectURL(im._blob) : im.dataURL || '');
 
 async function addFiles(side, files) {
   const list = [...files].filter(f => f.type && f.type.startsWith('image/'));
@@ -118,7 +145,7 @@ async function addFiles(side, files) {
   setActive(side);
   const msgs = [];
   for (const f of list) {
-    const entry = { id: uid(), name: f.name || '붙여넣은 이미지', dataURL: await readAsDataURL(f), kind: null };
+    const entry = { id: uid(), name: f.name || '붙여넣은 이미지', dataURL: null, kind: null, _blob: f };
     cur[side].images.push(entry);
     await runAnalysis(entry);
     if (replaceSameKind(side, entry)) msgs.push(`${SIDE_KO[side]} ${KIND_KO[kindOf(entry)]} 사진을 새 사진으로 바꿨어요.`);
@@ -129,13 +156,21 @@ async function addFiles(side, files) {
   else if (side === 'before' && !cur.after.images.length) toast('사냥 전 사진을 넣었어요. 사냥이 끝나면 "사냥 후" 칸에 넣어 주세요.');
 }
 
+const MAX_KEEP = 1.5 * 1024 * 1024; // 잘라내지 못한 큰 사진은 새로고침용으로 저장하지 않는다
 async function runAnalysis(entry) {
   pending.add(entry.id); render();
-  await new Promise(r => setTimeout(r, 30)); // 화면이 먼저 그려지도록
   try {
-    const tpl = await templates();
-    const px = await pixelsFromSource(entry.dataURL);
-    results.set(entry.id, analyze(px, tpl));
+    const blob = entry._blob || await (await fetch(entry.dataURL)).blob();
+    const { result, crop } = await analyzeBlob(blob);
+    results.set(entry.id, result);
+    // 화면 전체 캡처였다면 인벤토리·퀵슬롯 부분만 남긴다 (썸네일·저장·크게 보기 모두 가벼워짐)
+    if (crop) {
+      if (entry._url) { URL.revokeObjectURL(entry._url); entry._url = null; }
+      entry._blob = crop;
+      entry.dataURL = await readAsDataURL(crop);
+    } else if (!entry.dataURL) {
+      entry.dataURL = blob.size <= MAX_KEEP ? await readAsDataURL(blob) : null;
+    }
   } catch (e) {
     console.error(e);
     results.set(entry.id, { kind: 'unknown', meso: null, known: [], error: true });
@@ -262,10 +297,10 @@ function renderSide(side, agg) {
   const card = $(`.side[data-side="${side}"]`);
   const imgs = cur[side].images;
   card.classList.toggle('has-shots', imgs.length > 0);
-  $('.shots', card).innerHTML = imgs.map(im => {
+  const shotsHTML = imgs.map(im => {
     const d = shotDesc(im), kind = kindOf(im);
     return `<li class="shot" data-id="${im.id}">
-      <button class="thumb" style="background-image:url('${im.dataURL}')" title="인식 결과 크게 보기" aria-label="인식 결과 크게 보기"></button>
+      <button class="thumb" style="background-image:url('${thumbURL(im)}')" title="인식 결과 크게 보기" aria-label="인식 결과 크게 보기"></button>
       <div class="meta">
         <select aria-label="사진 종류">
           ${['use', 'etc', 'quick'].map(k => `<option value="${k}" ${kind === k ? 'selected' : ''}>${KIND_KO[k]}</option>`).join('')}
@@ -276,6 +311,9 @@ function renderSide(side, agg) {
       <button class="icon-btn" title="사진 빼기" aria-label="사진 빼기">✕</button>
     </li>`;
   }).join('');
+  // 바뀐 게 있을 때만 다시 그린다 (숫자를 고칠 때마다 썸네일을 다시 만들지 않도록)
+  const shotsEl = $('.shots', card);
+  if (shotsEl._html !== shotsHTML) { shotsEl.innerHTML = shotsHTML; shotsEl._html = shotsHTML; }
 
   const list = [...agg.items.entries()].filter(([id]) => USE[id]).sort((a, b) => ORDER[a[0]] - ORDER[b[0]]);
   const elist = [...agg.etc.entries()].filter(([id]) => ETCI[id]).sort((a, b) => EORDER[a[0]] - EORDER[b[0]]);
@@ -403,7 +441,7 @@ for (const side of SIDES) {
     const li = e.target.closest('.shot'); if (!li) return;
     const im = cur[side].images.find(x => x.id === li.dataset.id); if (!im) return;
     if (e.target.closest('.icon-btn')) {
-      cur[side].images = cur[side].images.filter(x => x !== im); results.delete(im.id);
+      cur[side].images = cur[side].images.filter(x => x !== im); dropImage(im);
       saveCur(); render();
     } else if (e.target.closest('.thumb')) openViewer(im);
   });
@@ -501,7 +539,7 @@ $('#btnClearHistory').addEventListener('click', () => {
 /* ---------- 인식 결과 크게 보기 ---------- */
 async function openViewer(im) {
   const r = results.get(im.id);
-  const bmp = await createImageBitmap(await (await fetch(im.dataURL)).blob());
+  const bmp = await createImageBitmap(im._blob || await (await fetch(im.dataURL)).blob());
   const s = bmp.width > 500 ? 1 : 2;
   const cv = $('#viewerCanvas'); cv.width = bmp.width * s; cv.height = bmp.height * s;
   const g = cv.getContext('2d'); g.imageSmoothingEnabled = false;
@@ -529,8 +567,9 @@ initCursor();
 setActive(activeSide);
 render();
 renderHistory();
-templates(); // 아이콘을 미리 받아 둔다 (첫 사진을 넣을 때 기다리지 않도록)
 (async () => {
+  // 새로고침 전에 넣어 둔 사진 다시 인식 (저장하지 못한 큰 사진은 뺀다)
+  for (const s of SIDES) cur[s].images = cur[s].images.filter(im => im.dataURL);
   for (const s of SIDES) for (const im of cur[s].images) await runAnalysis(im);
   let changed = false;
   for (const s of SIDES) for (const im of [...cur[s].images].reverse()) if (cur[s].images.includes(im) && replaceSameKind(s, im)) changed = true;
