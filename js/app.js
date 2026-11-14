@@ -248,7 +248,9 @@ function compute() {
   const mb = val('before', 'meso', A.before.meso), ma = val('after', 'meso', A.after.meso);
   const meso = { before: mb, after: ma, delta: mb != null && ma != null ? ma - mb : null, recBefore: A.before.meso, recAfter: A.after.meso };
 
-  const ids = new Set([...A.before.items.keys(), ...A.after.items.keys(), ...editedIds('i:')]);
+  // 물약은 사냥 전·후 모두 소비 창(또는 퀵슬롯) 사진이 있을 때만 비교한다
+  const useReady = A.before.hasUse && A.after.hasUse;
+  const ids = useReady ? new Set([...A.before.items.keys(), ...A.after.items.keys(), ...editedIds('i:')]) : new Set();
   const items = [...ids].filter(id => USE[id]).sort((a, b) => ORDER[a] - ORDER[b]).map(id => {
     const it = USE[id], key = 'i:' + id;
     const pc = pickCounts(A, id), rb = pc.b, ra = pc.a;
@@ -279,7 +281,9 @@ function compute() {
   const itemValue = items.reduce((s, r) => s + r.value, 0);
   const etcValue = etc.reduce((s, r) => s + r.value, 0);
   const net = meso.delta != null ? meso.delta + itemValue + etcValue : null;
-  return { A, meso, items, etc, etcState, itemValue, etcValue, net, ready: A.before.hasUse && A.after.hasUse };
+  // 소비 창이 없어도 사냥 후 기타 창이 있으면 메소·기타 아이템만으로 결과를 보여 준다
+  const etcReady = etcState === 'both' || etcState === 'afterOnly';
+  return { A, meso, items, etc, etcState, itemValue, etcValue, net, useReady, ready: useReady || etcReady };
 }
 
 /* ---------- 그리기 ---------- */
@@ -379,7 +383,7 @@ function renderResult(c) {
 
   $('#totals').innerHTML = `
     <div class="total"><div class="k">메소 변화</div><div class="v ${cls(c.meso.delta)}">${sfmt(c.meso.delta)}</div></div>
-    <div class="total"><div class="k">물약 금액 변화</div><div class="v ${cls(c.itemValue)}">${sfmt(c.itemValue)}</div></div>
+    ${c.useReady ? `<div class="total"><div class="k">물약 금액 변화</div><div class="v ${cls(c.itemValue)}">${sfmt(c.itemValue)}</div></div>` : ''}
     ${c.etcState === 'both' || c.etcState === 'afterOnly' ? `<div class="total"><div class="k">기타 아이템 판매가 변화</div><div class="v ${cls(c.etcValue)}">${sfmt(c.etcValue)}</div></div>` : ''}
     <div class="total main"><div class="k">순수익</div><div class="v ${cls(c.net)}">${c.net == null ? '메소를 못 읽었어요' : sfmt(c.net)}</div></div>`;
 
@@ -391,8 +395,10 @@ function renderResult(c) {
       <td class="${cls(m.delta)}">${sfmt(m.delta)}</td><td></td>
       <td class="${cls(m.delta)}">${sfmt(m.delta)}</td></tr>`];
   for (const r of c.items) rows.push(rowHTML(r, useImg(r.it), effect(r.it) + (r.src === 'quick' ? ' · 퀵슬롯 숫자 기준' : ''), 'data-price', r.it.buy != null ? `NPC 상점가 ${fmt(r.it.buy)}메소` : 'NPC가 팔지 않는 아이템'));
-  if (!c.items.length) rows.push('<tr><td colspan="6" class="empty">사진에서 물약을 찾지 못했어요.</td></tr>');
+  if (!c.useReady) rows.push('<tr><td colspan="6" class="empty">사냥 전·후 소비 창 사진을 모두 넣으면 물약 사용량도 계산해요.</td></tr>');
+  else if (!c.items.length) rows.push('<tr><td colspan="6" class="empty">사진에서 물약을 찾지 못했어요.</td></tr>');
   $('#itemTable tbody').innerHTML = rows.join('');
+  $('#useTitle').textContent = c.useReady ? '물약' : '메소';
 
   // 기타 아이템 (몬스터 드랍)
   let etcHTML = '';
@@ -424,12 +430,14 @@ function renderHistory() {
   $('#history').innerHTML = history.map(h => {
     const d = new Date(h.date), p = n => String(n).padStart(2, '0');
     const when = `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-    const used = h.items.filter(r => r.delta !== 0);
     const etc = (h.etc || []).filter(r => r.delta !== 0);
+    // 요약 줄 아이콘: 물약 변화가 없으면(기타 창만 넣은 기록 등) 기타 아이템 변화를 보여 준다
+    const potions = h.items.filter(r => r.delta !== 0).map(r => ({ ...r, src: `assets/items/${r.icon}.png` }));
+    const used = potions.length ? potions : etc.map(r => ({ ...r, src: `assets/etc/${r.icon}.png` }));
     return `<details class="rec" data-id="${h.id}">
       <summary>
         <span class="when">${when}</span>
-        <span class="used px">${used.slice(0, 8).map(r => `<span title="${esc(r.name)}"><img src="assets/items/${r.icon}.png" alt="">${sfmt(r.delta)}</span>`).join('') || '<span class="when">물약 변화 없음</span>'}</span>
+        <span class="used px">${used.slice(0, 8).map(r => `<span title="${esc(r.name)}"><img src="${r.src}" alt="">${sfmt(r.delta)}</span>`).join('') || '<span class="when">아이템 변화 없음</span>'}</span>
         <span class="net ${cls(h.net)}">${h.net == null ? '-' : sfmt(h.net)}<small>메소 ${sfmt(h.meso.delta)}${h.etcValue ? ` · 기타 ${sfmt(h.etcValue)}` : ''}</small></span>
         <button class="icon-btn del" title="이 기록 삭제" aria-label="이 기록 삭제">✕</button>
       </summary>
