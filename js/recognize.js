@@ -13,6 +13,8 @@ const TOL = 10;                       // 색 허용 오차
 const CELL_BORDER = [0xCE, 0xC9, 0xBE]; // 인벤토리 칸 왼쪽/위쪽 테두리
 const CELL_BG = [0xE1, 0xDF, 0xD5];     // 인벤토리 칸 바탕
 const CELL = 32;                        // 칸 크기
+// 인식 방식이 바뀌면 올린다 → 저장해 둔 인식 결과를 버리고 다시 인식
+export const VERSION = 2;
 
 // 메소 칸 숫자(굴림 11px) 모양
 const GULIM = {
@@ -67,7 +69,16 @@ function makeTemplate(key, px) {
   const quick = { pts: q, n: qn, anchors: qa, primary: pickPrimary(q, qn, () => true) };
   // 오른쪽 위쪽(개수 숫자와 먼 곳)의 눈에 띄는 색
   const primary = pickPrimary(pts, n, (x, y) => x >= px.w * 0.45 && y <= px.h * 0.6);
-  return { key, w: px.w, h: px.h, pts, n, anchors, primary, quick };
+  // 점들을 고르게 섞은 순서 (앞쪽 몇 개만 봐도 아이콘 전체를 대표하도록)
+  const mix = new Int32Array(n);
+  let s = n > 1 ? 7919 % n || 1 : 1;
+  const gcd = (a, b) => b ? gcd(b, a % b) : a;
+  while (n > 1 && gcd(s, n) !== 1) s++;
+  for (let j = 0; j < n; j++) mix[j] = (j * s) % n;
+  // 실제로 그려지는 점들의 범위
+  let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1;
+  for (let k = 0; k < n; k++) { const x = pts[k * 5], y = pts[k * 5 + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  return { key, w: px.w, h: px.h, pts, n, anchors, primary, quick, mix, x0, y0, x1, y1 };
 }
 
 // 큰 화면에서 빠르게 찾기 위한 "대표 픽셀" 3개: 채도가 높고 너무 어둡거나 밝지 않은 색, 서로 떨어진 곳
@@ -231,10 +242,9 @@ function findDigits(img, digits, buckets) {
 }
 
 /* ---------- 아이템 아이콘 ---------- */
-// partial: 아이콘 일부만 보여도(가려짐) 찾기 — 경고용
-function findIcons(img, mask, icons, whiten, buckets, partial = false) {
+function findIcons(img, mask, icons, whiten, buckets) {
   const { w, d } = img, found = [];
-  const minScore = partial ? 0.5 : whiten ? 0.88 : 0.9, maxMiss = partial ? 5 : 2;
+  const minScore = whiten ? 0.88 : 0.9, maxMiss = 2;
   for (const t of icons) {
     const src = whiten ? t.quick : t, P = src.pts;
     // 대표 픽셀이 맞는 자리만 후보로
@@ -267,45 +277,74 @@ function overlap(a, b) {
 }
 
 /* ---------- 인벤토리 칸 격자 ---------- */
+// 칸 왼쪽 위 모서리(테두리 3픽셀 + 바탕 1픽셀)를 모두 찾은 뒤, 서로 붙어 있는 가장 큰 무리(= 인벤토리 창)만 쓴다.
+// 화면 전체 캡처에 다른 창의 비슷한 칸이 함께 찍혀 있어도 섞이지 않는다.
 function findGrid(img) {
-  const { w, h, d } = img;
-  const is = (x, y, c, tol = 4) => x >= 0 && y >= 0 && x < w && y < h && same(d, (y * w + x) * 4, c[0], c[1], c[2], tol);
-  const xs = new Map(), ys = new Map();
-  for (let y = 0; y < h - 1; y++) for (let x = 0; x < w - 1; x++) {
-    if (is(x, y, CELL_BORDER) && is(x + 1, y, CELL_BORDER) && is(x, y + 1, CELL_BORDER) && is(x + 1, y + 1, CELL_BG)) {
-      xs.set(x, (xs.get(x) || 0) + 1); ys.set(y, (ys.get(y) || 0) + 1);
-    }
+  const { w, h, d } = img, W4 = w * 4;
+  const [br, bgg, bb] = CELL_BORDER, [gr, gg, gb] = CELL_BG;
+  const isB = p => Math.abs(d[p] - br) <= 4 && Math.abs(d[p + 1] - bgg) <= 4 && Math.abs(d[p + 2] - bb) <= 4;
+  const isG = p => Math.abs(d[p] - gr) <= 4 && Math.abs(d[p + 1] - gg) <= 4 && Math.abs(d[p + 2] - gb) <= 4;
+  const hx = [], hy = [];
+  for (let y = 0; y < h - 1; y++) for (let x = 0, p = y * W4; x < w - 1; x++, p += 4) {
+    if (Math.abs(d[p] - br) > 4) continue; // 빨강 값만으로 먼저 거른다
+    if (isB(p) && isB(p + 4) && isB(p + W4) && isG(p + W4 + 4)) { hx.push(x); hy.push(y); }
+    if (hx.length > 2000) break;
   }
-  if (!xs.size) return null;
-  // 칸 간격(가로 36 / 세로 34 정도)으로 사이에 빠진 줄을 채운다 → 무언가에 가려 모서리가 안 보이는 칸도 자리를 안다
-  const fill = (vals, lo, hi) => {
-    const v = [...vals].sort((a, b) => a - b), diffs = {};
-    for (let i = 1; i < v.length; i++) { const dd = v[i] - v[i - 1]; if (dd >= lo && dd <= hi) diffs[dd] = (diffs[dd] || 0) + 1; }
-    const step = +Object.keys(diffs).sort((a, b) => diffs[b] - diffs[a])[0];
-    if (!step) return v;
-    const out = [v[0]];
+  const N = hx.length;
+  if (N < 2) return null;
+  // 칸 간격: 같은 줄(열)에 있는 모서리끼리 가장 흔한 거리
+  const pitch = (A, B, lo, hi) => {
+    const cnt = {};
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      if (B[i] !== B[j]) continue;
+      const dd = A[j] - A[i];
+      if (dd >= lo && dd <= hi) cnt[dd] = (cnt[dd] || 0) + 1;
+    }
+    const k = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a])[0];
+    return k ? +k : 0;
+  };
+  const sx = pitch(hx, hy, 30, 45) || 36, sy = pitch(hy, hx, 28, 42) || 34;
+  // 가까이(칸 2개 반 이내) 있는 모서리끼리 한 무리로 묶고 가장 큰 무리를 고른다
+  const group = new Int32Array(N).fill(-1);
+  let best = [];
+  for (let s = 0; s < N; s++) {
+    if (group[s] >= 0) continue;
+    const members = [s], stack = [s]; group[s] = s;
+    while (stack.length) {
+      const i = stack.pop();
+      for (let j = 0; j < N; j++) {
+        if (group[j] >= 0 || Math.abs(hx[j] - hx[i]) > sx * 2.5 || Math.abs(hy[j] - hy[i]) > sy * 2.5) continue;
+        group[j] = s; members.push(j); stack.push(j);
+      }
+    }
+    if (members.length > best.length) best = members;
+  }
+  // 무리 안에서 빠진 줄(가려진 칸)을 칸 간격으로 채운다
+  const fill = (vals, step) => {
+    const v = [...new Set(vals)].sort((a, b) => a - b), out = [v[0]];
     for (let i = 1; i < v.length; i++) {
-      const gap = v[i] - out[out.length - 1];
-      if (gap > step * 1.5) for (let k = 1; out[out.length - 1] + step < v[i] - step / 2 && k < 20; k++) out.push(out[out.length - 1] + step);
+      if (v[i] - out[out.length - 1] < step * 0.5) continue; // 같은 줄로 본다
+      while (v[i] - out[out.length - 1] > step * 1.5) out.push(out[out.length - 1] + step);
       out.push(v[i]);
     }
     return out;
   };
-  const X = fill(xs.keys(), 30, 45), Y = fill(ys.keys(), 28, 42);
+  const X = fill(best.map(i => hx[i]), sx), Y = fill(best.map(i => hy[i]), sy);
   const cells = []; let covered = 0;
   for (const y of Y) for (const x of X) {
     if (x + CELL > w || y + CELL > h) continue;
-    let bg = 0, border = 0;
-    for (let yy = y; yy < y + CELL; yy += 2) for (let xx = x; xx < x + CELL; xx += 2) if (is(xx, yy, CELL_BG)) bg++;
-    for (let k = 0; k < CELL; k++) { if (is(x, y + k, CELL_BORDER)) border++; if (is(x + k, y, CELL_BORDER)) border++; }
-    if (bg >= 25) cells.push({ x, y, w: CELL, h: CELL });
-    else if (border < 6) covered++; // 칸 바탕도 테두리도 안 보임 = 다른 창·커서 등에 가려짐
+    let bgN = 0, border = 0;
+    for (let yy = y; yy < y + CELL; yy += 2) for (let xx = x; xx < x + CELL; xx += 2) if (isG((yy * w + xx) * 4)) bgN++;
+    for (let k = 0; k < CELL; k++) { if (isB(((y + k) * w + x) * 4)) border++; if (isB((y * w + x + k) * 4)) border++; }
+    if (bgN >= 25) cells.push({ x, y, w: CELL, h: CELL });
+    else if (border < 6) covered++; // 칸 바탕도 테두리도 안 보임 = 다른 창 등에 가려짐
   }
   if (!cells.length) return null;
   cells.covered = covered;
   return cells;
 }
 
+/* ---------- 가려진 곳 찾기 ---------- */
 // 칸 안에 바탕이 아닌 픽셀이 어느 정도 있으면 = 무언가 들어 있음
 function cellHasContent(img, mask, c) {
   const { w, d } = img; let n = 0;
@@ -316,63 +355,162 @@ function cellHasContent(img, mask, c) {
   }
   return false;
 }
-// 칸 안 여러 위치에서 아는 아이콘과 일정 비율 이상 맞으면 = 그 아이템이 일부 가려진 것
-const PARTIAL_MIN = 0.35;
-function partialIconIn(img, mask, c, icons) {
+
+// 게임 마우스 커서 (게임이 직접 그리는 커서라 캡처에 찍힌다). 사각형 r과 겹치는 위치만 본다.
+function findCursor(img, cursors, r) {
+  const { w, h, d } = img;
+  for (const t of cursors) {
+    const P = t.pts, A = t.primary;
+    const ya = Math.max(0, r.y0 - t.h + 1), yb = Math.min(h - t.h, r.y1);
+    const xa = Math.max(0, r.x0 - t.w + 1), xb = Math.min(w - t.w, r.x1);
+    for (let y = ya; y <= yb; y++) for (let x = xa; x <= xb; x++) {
+      let ok = true;
+      for (const k of A) if (!same(d, ((y + P[k * 5 + 1]) * w + x + P[k * 5]) * 4, P[k * 5 + 2], P[k * 5 + 3], P[k * 5 + 4])) { ok = false; break; }
+      if (ok && score(img, null, t, x, y, 0.85, false) >= 0.85) return { t, x, y };
+    }
+  }
+  return null;
+}
+
+// 템플릿 t를 (ox, oy)에 놓았을 때, "보이는 부분은 그대로 맞고 나머지는 무언가에 덮였는지" 판단한다.
+//  - hide(커서 자리)에 덮인 경우: 보이는 점이 거의 다 맞아야 한다
+//  - 창·설명 상자 같은 사각형에 덮인 경우: 안 맞는 점들이 템플릿 가장자리에서 들어온 한 덩어리여야 한다
+//    (비슷하게 생긴 다른 아이템은 안 맞는 점이 아이콘 곳곳에 흩어져 있어서 걸러진다)
+const OKBUF = new Uint8Array(4096);
+function occludedAt(img, mask, hide, t, ox, oy, tol, minVisible) {
+  const { w, d } = img, P = t.pts, n = t.n;
+  let ok = 0, bad = 0, hid = 0, skip = 0, bx0 = 1e9, by0 = 1e9, bx1 = -1, by1 = -1;
+  const maxBad = n * (1 - minVisible);
+  for (let k = 0; k < n; k++) {
+    const px = P[k * 5], py = P[k * 5 + 1], p = (oy + py) * w + ox + px;
+    OKBUF[k] = 2;
+    if (mask[p]) { skip++; continue; }
+    if (hide && hide[p]) { hid++; continue; }
+    if (same(d, p * 4, P[k * 5 + 2], P[k * 5 + 3], P[k * 5 + 4], tol)) { ok++; OKBUF[k] = 1; continue; }
+    OKBUF[k] = 0;
+    if (++bad > maxBad) return false;
+    if (px < bx0) bx0 = px; if (px > bx1) bx1 = px; if (py < by0) by0 = py; if (py > by1) by1 = py;
+  }
+  const seen = ok + bad;
+  if (skip > n * 0.2 || ok < n * minVisible) return false;
+  if (hid >= Math.max(3, n * 0.05) && bad <= seen * 0.08) return true; // 커서에 덮임
+  if (bad < Math.max(3, seen * 0.08)) return false;                    // 다 보임 = 가려진 게 아님
+  const edge = bx0 <= t.x0 + 1 || by0 <= t.y0 + 1 || bx1 >= t.x1 - 1 || by1 >= t.y1 - 1;
+  if (!edge) return false;
+  let inOk = 0, inAll = 0;
+  for (let k = 0; k < n; k++) {
+    if (OKBUF[k] === 2) continue;
+    const px = P[k * 5], py = P[k * 5 + 1];
+    if (px < bx0 || px > bx1 || py < by0 || py > by1) continue;
+    inAll++; if (OKBUF[k] === 1) inOk++;
+  }
+  return inOk <= inAll * 0.05;
+}
+
+// 칸 안에 아는 아이콘이 일부만 보이는지
+function partialIconIn(img, mask, hide, c, icons) {
   const { w, h, d } = img;
   for (const t of icons) {
-    const step = Math.max(1, Math.floor(t.n / 60)); // 60점 정도만 골라 빠르게 비교
-    const maxBad = Math.ceil(t.n / step * (1 - PARTIAL_MIN));
+    const P = t.pts, n = t.n, mix = t.mix;
     for (let oy = c.y - 4; oy <= c.y + 8; oy++) for (let ox = c.x - 4; ox <= c.x + 8; ox++) {
       if (ox < 0 || oy < 0 || ox + t.w > w || oy + t.h > h) continue;
-      let ok = 0, seen = 0, bad = 0;
-      for (let k = 0; k < t.n; k += step) {
-        const p = (oy + t.pts[k * 5 + 1]) * w + ox + t.pts[k * 5];
-        if (mask[p]) continue;
-        seen++;
-        if (same(d, p * 4, t.pts[k * 5 + 2], t.pts[k * 5 + 3], t.pts[k * 5 + 4])) ok++; else if (++bad > maxBad) break;
+      // 아이콘 전체에 고르게 퍼진 16점 중 3점 이상 맞는 자리만 자세히 본다
+      let q = 0, qs = 0;
+      for (let j = 0; j < n && qs < 16; j++) {
+        const k = mix[j], p = (oy + P[k * 5 + 1]) * w + ox + P[k * 5];
+        if (mask[p] || (hide && hide[p])) continue;
+        qs++;
+        if (same(d, p * 4, P[k * 5 + 2], P[k * 5 + 3], P[k * 5 + 4])) q++;
       }
-      if (bad <= maxBad && seen >= 25 && ok / seen >= PARTIAL_MIN) return true;
+      if (q < 3) continue;
+      if (occludedAt(img, mask, hide, t, ox, oy, TOL, 0.35)) return true;
     }
   }
   return false;
 }
 
-// 게임 마우스 커서가 사각형(인벤토리) 안에 찍혀 있는지 (커서는 캡처에 그대로 찍힌다)
-function cursorIn(img, cursors, r) {
+// 칸의 개수 숫자 줄(dy: 칸 위에서 숫자까지 거리)에 일부만 보이는 숫자가 있는지
+function partialDigitIn(img, mask, hide, c, digits, dy) {
   const { w, h } = img;
-  for (const t of cursors) {
-    for (let y = Math.max(0, r.y0 - t.h); y <= Math.min(h - t.h, r.y1); y++) for (let x = Math.max(0, r.x0 - t.w); x <= Math.min(w - t.w, r.x1); x++) {
-      if (score(img, null, t, x, y, 0.85, false) >= 0.85) return true;
-    }
-  }
-  return false;
-}
-
-// 칸 왼쪽 아래(개수 숫자 자리)에 숫자가 일부만 보이면 = 숫자가 가려진 것
-function partialDigitIn(img, cell, digits) {
-  const { w, h, d } = img;
-  for (let y0 = cell.y + 14; y0 <= cell.y + 24; y0++) for (let x0 = cell.x - 1; x0 <= cell.x + 12; x0++) {
+  const ys = dy == null ? [14, 26] : [dy, dy];
+  for (let y0 = c.y + ys[0]; y0 <= c.y + ys[1]; y0++) for (let x0 = c.x - 1; x0 <= c.x + 24; x0++) {
     for (const t of digits) {
       if (x0 < 0 || y0 < 0 || x0 + t.w > w || y0 + t.h > h) continue;
-      let ok = 0, bad = 0; const maxBad = t.n * 0.35;
-      for (let k = 0; k < t.n; k++) {
-        const p = ((y0 + t.pts[k * 5 + 1]) * w + x0 + t.pts[k * 5]) * 4;
-        if (same(d, p, t.pts[k * 5 + 2], t.pts[k * 5 + 3], t.pts[k * 5 + 4], 8)) ok++; else if (++bad > maxBad) break;
-      }
-      if (bad <= maxBad && ok < t.n) return true;
+      if (occludedAt(img, mask, hide, t, x0, y0, 8, 0.4)) return true;
     }
   }
   return false;
+}
+
+// 화면 쪽에 알려 줄 "가려진 곳" 목록
+function findWarnings(ctx, tpl) {
+  const { img, mask, grid, known, coin, meso, kind, digitDy, cellRuns } = ctx, warn = {};
+  if (!grid) return warn;
+  const { w } = img;
+  if (!coin) warn.meso = 'hidden';                 // 동전·메소 칸이 안 보임
+  else if (meso == null) warn.meso = 'unreadable';   // 메소 숫자를 못 읽음
+  if (grid.covered) warn.covered = grid.covered;     // 칸 전체가 가려짐
+
+  // 인벤토리(+메소 칸) 위에 게임 커서가 있으면 그 자리는 "가려진 곳"으로 따로 표시
+  const gx0 = Math.min(...grid.map(c => c.x)), gy0 = Math.min(...grid.map(c => c.y));
+  const gx1 = Math.max(...grid.map(c => c.x + CELL)), gy1 = Math.max(...grid.map(c => c.y + CELL));
+  const mesoBox = coin ? { x0: coin.x + 14, y0: coin.y - 4, x1: coin.x + 175, y1: coin.y + 18 } : null;
+  const cur = tpl.cursors ? findCursor(img, tpl.cursors, { x0: gx0, y0: gy0, x1: gx1, y1: Math.max(gy1, mesoBox ? mesoBox.y1 : 0) }) : null;
+  let hide = null;
+  if (cur) {
+    hide = new Uint8Array(img.w * img.h);
+    for (let k = 0; k < cur.t.n; k++) hide[(cur.y + cur.t.pts[k * 5 + 1]) * w + cur.x + cur.t.pts[k * 5]] = 1;
+  }
+  const cursorOver = (x0, y0, x1, y1) => {
+    if (!cur) return false;
+    const P = cur.t.pts;
+    for (let k = 0; k < cur.t.n; k++) {
+      const x = cur.x + P[k * 5], y = cur.y + P[k * 5 + 1];
+      if (x >= x0 && x < x1 && y >= y0 && y < y1) return true;
+    }
+    return false;
+  };
+
+  const taken = new Set(known.map(k => k.box));
+  const content = grid.filter(c => taken.has(c) || cellHasContent(img, mask, c));
+  const suspects = content.filter(c => !taken.has(c));
+  // 아는 아이템인데 아이콘 일부가 가려져서 못 알아본 칸 (기타 창이면 기타 아이템만, 소비 창이면 소비 아이템만 비교)
+  const pool = tpl.icons.filter(t => String(t.key).startsWith('e:') === (kind === 'etc'));
+  const hiddenItems = suspects.filter(c => partialIconIn(img, mask, hide, c, pool)).length;
+  if (hiddenItems) warn.items = hiddenItems;
+  // 개수 숫자가 일부 가려진 칸
+  // 커서는 읽은 숫자 바로 앞·뒤의 "숫자 하나 들어갈 자리"를 절반 넘게 덮을 때만 문제다
+  // (숫자가 조금이라도 보이면 아래 partialDigitIn이 찾는다)
+  const dh = tpl.digits[0].h, dw = Math.max(...tpl.digits.map(t => t.w));
+  const slotHidden = (x0, y0) => {
+    let n = 0;
+    for (let y = y0; y < y0 + dh; y++) for (let x = x0; x < x0 + dw; x++) if (hide[y * w + x]) n++;
+    return n >= dw * dh * 0.5;
+  };
+  const cursorOnDigits = c => {
+    if (!cur || digitDy == null) return false;
+    const r = cellRuns.get(c), y0 = c.y + digitDy;
+    if (!r) return slotHidden(c.x + 1, y0);
+    return (r.x - c.x >= dw && slotHidden(r.x - dw, y0)) || slotHidden(r.x + r.w, y0);
+  };
+  const hiddenCounts = content.filter(c => cursorOnDigits(c) || partialDigitIn(img, mask, hide, c, tpl.digits, digitDy)).length;
+  if (hiddenCounts) warn.counts = hiddenCounts;
+  // 메소 숫자 위에 커서
+  if (mesoBox && cursorOver(mesoBox.x0, mesoBox.y0, mesoBox.x1, mesoBox.y1)) warn.meso = 'unreadable';
+  // 커서 때문에 생긴 문제면 문구에서 커서를 콕 집어 말한다
+  if (cur && (warn.items || warn.counts || warn.meso === 'unreadable')) warn.cursor = true;
+  return warn;
 }
 
 /* ---------- 메소 ---------- */
-function findCoin(img, coin, buckets) {
+// near가 있으면 인벤토리 칸 바로 아래에 있는 동전만, 없으면 가장 아래쪽 동전
+function findCoin(img, coin, buckets, near) {
   const { w } = img;
   let best = null;
   for (const o of candidates(img, buckets, coin, coin)) {
     const x = o % w, y = (o / w) | 0;
-    if (score(img, null, coin, x, y, 0.95, false) >= 0.95 && (!best || y > best.y)) best = { x, y }; // 여러 개면 가장 아래쪽
+    if (near && (x < near.x0 - 30 || x > near.x1 || y < near.y1 - 4 || y > near.y1 + 70)) continue;
+    if (score(img, null, coin, x, y, 0.95, false) >= 0.95 && (!best || y > best.y)) best = { x, y };
   }
   return best;
 }
@@ -413,20 +551,26 @@ function readMeso(img, coin) {
 }
 
 /* ---------- 전체 분석 ---------- */
-// return { kind:'use'|'etc'|'quick'|'unknown', inventory, meso, known:[{icon,count,box}] }
+// return { kind:'use'|'etc'|'quick'|'unknown', inventory, meso, known:[{icon,count,box}], quick, warn }
 // 아이콘 key가 'e:'로 시작하면 기타 아이템, 그 밖은 소비 아이템
-export function analyze(img, tpl) {
+// withWarn=false면 가려진 곳 검사는 건너뛰고, 나중에 addWarnings(result, tpl)로 할 수 있다
+export function analyze(img, tpl, withWarn = true) {
   const T = {}, now = () => performance.now(); let t = now();
   const lap = k => { const n = now(); T[k] = Math.round(n - t); t = n; };
   const buckets = colorBuckets(img, tpl.colors); lap('buckets');
   const { runs, mask } = findDigits(img, tpl.digits, buckets); lap('digits');
-  const coin = findCoin(img, tpl.coin, buckets); lap('coin');
   const grid = findGrid(img); lap('grid');
   const isInventory = !!(grid && grid.length >= 4);
+  let gb = null;
+  if (isInventory) gb = {
+    x0: Math.min(...grid.map(c => c.x)), y0: Math.min(...grid.map(c => c.y)),
+    x1: Math.max(...grid.map(c => c.x + CELL)), y1: Math.max(...grid.map(c => c.y + CELL))
+  };
+  const coin = findCoin(img, tpl.coin, buckets, gb); lap('coin');
   const icons = findIcons(img, mask, tpl.icons, !isInventory, buckets); lap('icons');
   const meso = coin ? readMeso(img, coin) : null;
 
-  const usedRuns = new Set();
+  const usedRuns = new Set(), dys = {}, cellRuns = new Map();
   const runFor = (box, cell) => {
     let best = null, bd = 1e9;
     runs.forEach((r, i) => {
@@ -439,7 +583,9 @@ export function analyze(img, tpl) {
       if (dist < bd) { bd = dist; best = i; }
     });
     if (best == null) return null;
-    usedRuns.add(best); return runs[best].value;
+    usedRuns.add(best);
+    if (cell) { const dy = runs[best].y - cell.y; dys[dy] = (dys[dy] || 0) + 1; cellRuns.set(cell, runs[best]); }
+    return runs[best].value;
   };
   const cellOf = b => grid && grid.find(c => b.x + b.w / 2 >= c.x && b.x + b.w / 2 < c.x + CELL && b.y + b.h / 2 >= c.y && b.y + b.h / 2 < c.y + CELL);
 
@@ -448,14 +594,13 @@ export function analyze(img, tpl) {
   const known = inCells.map(f => {
     const cell = cellOf(f);
     const n = runFor(f, cell);
-    return { icon: f.icon, count: n == null ? 1 : n, box: cell || f, noDigits: n == null };
+    return { icon: f.icon, count: n == null ? 1 : n, box: cell || f };
   });
 
   // 화면 전체 캡처처럼 인벤토리 밖에 퀵슬롯이 함께 찍힌 경우: 퀵슬롯 아이콘은 따로 모은다
   let quick = [];
   if (isInventory) {
-    const gx0 = Math.min(...grid.map(c => c.x)) - 4, gy0 = Math.min(...grid.map(c => c.y)) - 4;
-    const gx1 = Math.max(...grid.map(c => c.x + CELL)) + 4, gy1 = Math.max(...grid.map(c => c.y + CELL)) + 60; // 아래 메소 칸까지
+    const gx0 = gb.x0 - 4, gy0 = gb.y0 - 4, gx1 = gb.x1 + 4, gy1 = gb.y1 + 60; // 아래 메소 칸까지
     const inside = b => b.x + b.w / 2 >= gx0 && b.x + b.w / 2 <= gx1 && b.y + b.h / 2 >= gy0 && b.y + b.h / 2 <= gy1;
     if ((gx1 - gx0) * (gy1 - gy0) < img.w * img.h * 0.6) {
       const useIcons = tpl.icons.filter(t => !String(t.key).startsWith('e:'));
@@ -472,27 +617,19 @@ export function analyze(img, tpl) {
   else kind = nUse ? 'quick' : 'unknown';
   lap('quick');
 
-  // 가려진 곳 찾기 (다시 캡처해 달라고 알려 주기 위해)
-  const warn = {};
-  if (isInventory) {
-    if (!coin) warn.meso = 'hidden';               // 동전·메소 칸이 안 보임
-    else if (meso == null) warn.meso = 'unreadable'; // 메소 숫자가 가려져 못 읽음
-    if (grid.covered) warn.covered = grid.covered;   // 칸 자체가 가려짐
-    const hiddenCounts = known.filter(k => k.noDigits && partialDigitIn(img, k.box, tpl.digits)).length;
-    if (hiddenCounts) warn.counts = hiddenCounts;   // 개수 숫자 일부가 가려짐
-    // 아는 아이템인데 아이콘 일부가 가려져서 못 찾은 칸
-    const taken = new Set(known.map(k => k.box));
-    const suspects = grid.filter(c => !taken.has(c) && cellHasContent(img, mask, c));
-    const hiddenItems = suspects.filter(c => partialIconIn(img, mask, c, tpl.icons)).length;
-    if (hiddenItems) warn.items = hiddenItems;
-    // 마우스 커서가 칸이나 메소 칸 위에 있으면 (숫자·아이콘을 가렸을 수 있음)
-    const gx0 = Math.min(...grid.map(c => c.x)), gy0 = Math.min(...grid.map(c => c.y));
-    const gx1 = Math.max(...grid.map(c => c.x + CELL)), gy1 = Math.max(...grid.map(c => c.y + CELL)) + 30;
-    if (tpl.cursors && cursorIn(img, tpl.cursors, { x0: gx0, y0: gy0, x1: gx1, y1: gy1 })) warn.cursor = true;
-  }
-  known.forEach(k => delete k.noDigits);
-  lap('warn');
-  return { kind, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn, w: img.w, h: img.h, timings: T };
+  const dyKeys = Object.keys(dys);
+  const digitDy = dyKeys.length ? +dyKeys.sort((a, b) => dys[b] - dys[a])[0] : null;
+  const result = { kind, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn: {}, w: img.w, h: img.h, timings: T };
+  // 가려진 곳 검사에 필요한 것들 (화면 쪽으로는 보내지 않는다)
+  Object.defineProperty(result, 'ctx', { value: { img, mask, grid: isInventory ? grid : null, known, coin, meso, kind, digitDy, cellRuns }, enumerable: false });
+  if (withWarn) addWarnings(result, tpl);
+  return result;
+}
+export function addWarnings(result, tpl) {
+  const t0 = performance.now();
+  result.warn = findWarnings(result.ctx, tpl);
+  result.timings.warn = Math.round(performance.now() - t0);
+  return result;
 }
 
 /* ---------- 필요한 부분만 잘라 두기 ---------- */
@@ -514,27 +651,29 @@ function regionOf(r, W, H) {
   const parts = boxes.map(b => ({ x: Math.max(0, b.x0), y: Math.max(0, b.y0), x1: Math.min(W, b.x1), y1: Math.min(H, b.y1) }));
   return { x, y, w: x1 - x, h: y1 - y, parts };
 }
-const summary = r => JSON.stringify([r.kind, r.meso, r.known.map(k => k.icon + ':' + k.count).sort(), (r.quick || []).map(k => k.icon + ':' + k.count).sort(), r.warn]);
+const summary = r => JSON.stringify([r.kind, r.meso, r.known.map(k => k.icon + ':' + k.count).sort(), (r.quick || []).map(k => k.icon + ':' + k.count).sort()]);
 
 // 사진 한 장을 분석하고, 화면 전체 캡처라면 필요한 부분만 잘라낸 PNG도 돌려준다.
 // 잘라낸 사진을 다시 분석해서 결과가 똑같을 때만 잘라낸 것을 쓴다.
+// 가려진 곳 검사는 마지막에 쓰는 사진 한 장에만 한다.
 export async function processBlob(blob, tpl) {
   const bmp = await createImageBitmap(blob);
   const px = bitmapPixels(bmp);
-  const result = analyze(px, tpl);
-  let crop = null, out = result;
+  const result = analyze(px, tpl, false);
+  let crop = null, out = null;
   const reg = regionOf(result, px.w, px.h);
   if (reg && reg.w > 0 && reg.h > 0 && reg.w * reg.h < px.w * px.h * 0.7) {
     const c = makeCanvas(reg.w, reg.h), ctx = c.getContext('2d', { willReadFrequently: true });
     // 인벤토리·퀵슬롯 부분만 옮기고 그 사이 배경은 단색으로 → PNG가 훨씬 작아진다
     ctx.fillStyle = '#20252c'; ctx.fillRect(0, 0, reg.w, reg.h);
     for (const p of reg.parts) ctx.drawImage(bmp, p.x, p.y, p.x1 - p.x, p.y1 - p.y, p.x - reg.x, p.y - reg.y, p.x1 - p.x, p.y1 - p.y);
-    const r2 = analyze({ w: reg.w, h: reg.h, d: ctx.getImageData(0, 0, reg.w, reg.h).data }, tpl);
+    const r2 = analyze({ w: reg.w, h: reg.h, d: ctx.getImageData(0, 0, reg.w, reg.h).data }, tpl, true);
     if (summary(r2) === summary(result)) {
       out = r2;
       crop = c.convertToBlob ? await c.convertToBlob({ type: 'image/png' }) : await new Promise(res => c.toBlob(res, 'image/png'));
     }
   }
+  if (!out) out = addWarnings(result, tpl);
   bmp.close && bmp.close();
   // 화면 쪽으로 보낼 결과에서 큰 데이터는 뺀다
   const { grid, ...rest } = out;

@@ -1,5 +1,5 @@
 import { ITEMS, ETC } from './items.js';
-import { loadTemplates, processBlob } from './recognize.js';
+import { loadTemplates, processBlob, VERSION } from './recognize.js';
 import { initCursor } from './cursor.js';
 
 /* ---------- 도우미 ---------- */
@@ -181,6 +181,8 @@ async function runAnalysis(entry) {
     const blob = entry._blob || await (await fetch(entry.dataURL)).blob();
     const { result, crop } = await analyzeBlob(blob);
     results.set(entry.id, result);
+    const { timings, ...keep } = result;
+    entry.res = { v: VERSION, ...keep }; // 새로고침해도 다시 인식하지 않도록 결과도 저장
     // 화면 전체 캡처였다면 인벤토리·퀵슬롯 부분만 남긴다 (썸네일·저장·크게 보기 모두 가벼워짐)
     if (crop) {
       if (entry._url) { URL.revokeObjectURL(entry._url); entry._url = null; }
@@ -593,7 +595,10 @@ renderHistory();
 (async () => {
   // 새로고침 전에 넣어 둔 사진 다시 인식 (저장하지 못한 큰 사진은 뺀다)
   for (const s of SIDES) cur[s].images = cur[s].images.filter(im => im.dataURL);
-  for (const s of SIDES) for (const im of cur[s].images) await runAnalysis(im);
+  for (const s of SIDES) for (const im of cur[s].images) {
+    if (im.res && im.res.v === VERSION) results.set(im.id, im.res); // 저장해 둔 결과 그대로
+    else await runAnalysis(im);
+  }
   let changed = false;
   for (const s of SIDES) for (const im of [...cur[s].images].reverse()) if (cur[s].images.includes(im) && replaceSameKind(s, im)) changed = true;
   if (changed) saveCur();
