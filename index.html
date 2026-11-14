@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>물약 · 메소 계산기</title>
+<meta name="description" content="사냥 전후 인벤토리 사진으로 물약 사용량, 기타 아이템 수익, 메소 변화를 계산합니다. 기록은 내 브라우저에만 저장됩니다.">
+<link rel="icon" href="assets/items/2000000.png">
+<script>
+  // 화면이 깜빡이지 않도록 테마를 먼저 적용
+  try { const t = localStorage.getItem('pmt2.theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-row">
+    <div>
+      <h1><img src="assets/items/2000000.png" alt="" class="px"> 물약 · 메소 계산기</h1>
+      <p>사냥 전과 후의 인벤토리 사진을 올리면 물약 사용량과 메소·아이템 수익을 계산해요.</p>
+    </div>
+    <div class="top-actions">
+      <button class="btn small ghost-plain" id="btnGuide" type="button">캡처 방법</button>
+      <button class="btn small ghost-plain theme-btn" id="btnTheme" type="button" aria-label="다크 모드 켜기">
+        <svg class="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <span class="t-label">다크 모드</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="overlay" id="guide" hidden>
+  <section class="guide-modal" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+    <div class="guide-text">
+      <div class="viewer-head"><h2 id="guideTitle">캡처 방법</h2><button class="btn small" id="guideClose" type="button">닫기</button></div>
+      <ol class="steps">
+        <li><span class="step">1</span><div><b>게임에서 인벤토리를 열고 소비 탭을 눌러요.</b><small>I 키로 열 수 있어요.</small></div></li>
+        <li><span class="step">2</span><div><b><kbd>Win</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>로 인벤토리 창만 캡처해요.</b><small><kbd>PrtSc</kbd>로 화면 전체를 찍어도 돼요. 확대·축소하지 않은 원본 그대로 써 주세요.</small></div></li>
+        <li><span class="step">3</span><div><b>이 페이지에서 [클립보드에 있는 이미지 넣기]를 누르거나 <kbd>Ctrl</kbd>+<kbd>V</kbd>.</b><small>사냥이 끝나면 같은 방법으로 "사냥 후" 칸에 넣어요.</small></div></li>
+      </ol>
+      <ul class="tips">
+        <li><b>기타 탭</b>도 찍어 넣으면 몬스터가 드랍한 기타 아이템의 판매 수익까지 계산해요.</li>
+        <li><b>퀵슬롯</b>을 찍어 넣으면 물약 전체 개수를 더 정확하게 셀 수 있어요.</li>
+        <li>같은 창을 다시 넣으면 새 사진으로 바뀌어요.</li>
+      </ul>
+    </div>
+    <figure class="guide-shot">
+      <img src="assets/guide/inventory.png" alt="소비 탭이 열린 인벤토리 창 캡처 예시" class="px">
+      <figcaption>이렇게 인벤토리 창만 찍으면 돼요</figcaption>
+    </figure>
+  </section>
+  </div>
+
+  <section class="sides">
+    <article class="card side" data-side="before">
+      <h2><span class="step">1</span>사냥 전</h2>
+      <div class="drop" role="button" tabindex="0" aria-label="사냥 전 사진 올리기">
+        <input type="file" accept="image/*" multiple hidden>
+        <strong>소비 창 사진을 올려 주세요</strong>
+        <span>끌어다 놓기 · 클릭해서 고르기 · <kbd>Ctrl</kbd>+<kbd>V</kbd></span>
+        <small>기타 창·퀵슬롯 사진도 함께 올리면 더 정확해요 (선택)</small>
+      </div>
+      <button class="btn paste" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>클립보드에 있는 이미지 넣기</button>
+      <ul class="shots"></ul>
+      <div class="found"></div>
+    </article>
+
+    <article class="card side" data-side="after">
+      <h2><span class="step">2</span>사냥 후</h2>
+      <div class="drop" role="button" tabindex="0" aria-label="사냥 후 사진 올리기">
+        <input type="file" accept="image/*" multiple hidden>
+        <strong>사냥을 마친 뒤 소비 창 사진</strong>
+        <span>끌어다 놓기 · 클릭해서 고르기 · <kbd>Ctrl</kbd>+<kbd>V</kbd></span>
+        <small>사냥 전과 같은 종류의 사진을 올려 주세요</small>
+      </div>
+      <button class="btn paste" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>클립보드에 있는 이미지 넣기</button>
+      <ul class="shots"></ul>
+      <div class="found"></div>
+    </article>
+  </section>
+
+  <section class="card result" id="result" hidden>
+    <div class="result-head">
+      <h2>결과</h2>
+      <div class="actions">
+        <button class="btn primary" id="btnSave">기록 저장</button>
+        <button class="btn" id="btnReset">새로 시작</button>
+      </div>
+    </div>
+    <div class="totals" id="totals"></div>
+    <h3 class="sub">물약</h3>
+    <div class="table-wrap">
+      <table class="items" id="itemTable">
+        <thead><tr><th>아이템</th><th>사냥 전</th><th>사냥 후</th><th>변화</th><th>개당 가격</th><th>금액</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="etcBox"></div>
+    <p class="hint">숫자가 틀리게 읽혔으면 칸을 눌러 고칠 수 있어요. 비우면 인식한 값으로 돌아가요.</p>
+  </section>
+
+  <section class="card" id="historyCard">
+    <div class="result-head">
+      <h2>지난 기록</h2>
+      <button class="btn small ghost" id="btnClearHistory" hidden>전체 삭제</button>
+    </div>
+    <div id="history"></div>
+  </section>
+</main>
+
+<footer class="wrap foot">기록은 이 브라우저에만 저장돼요. 다른 기기나 브라우저에서는 보이지 않아요.</footer>
+
+<div class="overlay" id="viewer" hidden>
+  <div class="viewer" role="dialog" aria-modal="true" aria-labelledby="viewerTitle">
+    <div class="viewer-head"><strong id="viewerTitle"></strong><button class="btn small" id="viewerClose">닫기</button></div>
+    <div class="viewer-body"><canvas id="viewerCanvas"></canvas></div>
+    <p class="hint">주황 테두리: 물약 · 파랑 테두리: 기타 아이템</p>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
