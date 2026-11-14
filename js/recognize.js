@@ -14,7 +14,7 @@ const CELL_BORDER = [0xCE, 0xC9, 0xBE]; // 인벤토리 칸 왼쪽/위쪽 테두
 const CELL_BG = [0xE1, 0xDF, 0xD5];     // 인벤토리 칸 바탕
 const CELL = 32;                        // 칸 크기
 // 인식 방식이 바뀌면 올린다 → 저장해 둔 인식 결과를 버리고 다시 인식
-export const VERSION = 4;
+export const VERSION = 5;
 
 // 메소 칸 숫자(굴림 11px) 모양
 const GULIM = {
@@ -230,6 +230,11 @@ function findDigits(img, digits, buckets) {
       if (k === t.n) hits.push({ ch: t.key, x, y, w: t.w, h: t.h, t });
     }
   }
+  const mask = new Uint8Array(w * h);
+  return { runs: digitRuns(hits, mask, w), mask };
+}
+// 찾은 숫자들을 줄(여러 자리 수)로 묶고, 숫자가 덮은 픽셀을 mask에 표시한다
+function digitRuns(hits, mask, w) {
   // 겹치는 후보는 픽셀이 더 많은 숫자를 남긴다
   hits.sort((a, b) => b.t.n - a.t.n);
   const kept = [];
@@ -242,9 +247,52 @@ function findDigits(img, digits, buckets) {
     if (r) { r.text += g.ch; r.x2 = g.x + g.w; r.parts.push(g); }
     else runs.push({ x: g.x, y: g.y, x2: g.x + g.w, h: g.h, text: g.ch, parts: [g] });
   }
-  const mask = new Uint8Array(w * h);
   for (const g of kept) for (let k = 0; k < g.t.n; k++) mask[(g.y + g.t.pts[k * 5 + 1]) * w + g.x + g.t.pts[k * 5]] = 1;
-  return { runs: runs.map(r => ({ x: r.x, y: r.y, w: r.x2 - r.x, h: r.h, value: parseInt(r.text, 10) })), mask };
+  return runs.map(r => ({ x: r.x, y: r.y, w: r.x2 - r.x, h: r.h, value: parseInt(r.text, 10) }));
+}
+
+/* ---------- 주황색 틀 ---------- */
+// 게임이 아이템 칸 둘레에 주황·노란색 틀을 그려 둘 때가 있다(둘레를 따라 빛이 돈다).
+// 틀은 칸 테두리와 그 안쪽 2~3픽셀을 덮어서, 칸을 꽉 채우는 아이콘은 가장자리가 가려진다.
+// → 틀이 있는 칸은 가장자리 띠를 "안 보이는 곳"(mask)으로 치고 나머지로만 비교한다.
+const FRAME_IN = 2; // 칸 안쪽으로 늘 가려진다고 보는 두께 (그 안쪽 3픽셀은 틀 색일 때만)
+const isFrameColor = (d, i) => d[i] >= 200 && d[i + 1] >= 130 && d[i + 2] <= 215 && d[i] - d[i + 2] >= 35 && d[i] >= d[i + 1] - 6;
+function hasFrame(img, x, y) {
+  const { w, h, d } = img, side = [0, 0, 0, 0];
+  const hit = (px, py, s) => { if (px >= 0 && py >= 0 && px < w && py < h && isFrameColor(d, (py * w + px) * 4)) side[s]++; };
+  for (let k = 0; k < CELL; k++) for (let o = -2; o <= 2; o++) {
+    hit(x + k, y + o, 0); hit(x + k, y + CELL - 1 + o, 1); hit(x + o, y + k, 2); hit(x + CELL - 1 + o, y + k, 3);
+  }
+  // 네 변 가운데 세 변 이상에 틀 색이 이어져 있어야 한다 (노란 아이템이 칸 한쪽에 닿은 것과 구분)
+  return side.filter(n => n >= 12).length >= 3;
+}
+function maskFrame(img, mask, c) {
+  const { w, h, d } = img;
+  for (let y = c.y - 3; y < c.y + CELL + 3; y++) for (let x = c.x - 3; x < c.x + CELL + 3; x++) {
+    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+    const edge = Math.min(x - c.x, c.x + CELL - 1 - x, y - c.y, c.y + CELL - 1 - y); // 칸 가장자리에서 안쪽으로 몇 픽셀
+    if (edge < FRAME_IN || (edge < FRAME_IN + 3 && isFrameColor(d, (y * w + x) * 4))) mask[y * w + x] = 1;
+  }
+}
+// 틀이 있는 칸의 개수 숫자: 숫자는 칸 왼쪽 끝에서 시작해서 첫 자리가 틀에 덮일 수 있다 → 틀 자리(ring)는 빼고 다시 맞춰 본다
+function framedDigits(img, ring, mask, c, digits) {
+  const { w, h, d } = img;
+  const x0 = c.x - 2, x1 = c.x + 26, y0 = c.y + 10, y1 = c.y + 24;
+  const hits = [];
+  for (const t of digits) for (let y = y0; y <= y1; y++) for (let x = Math.max(0, x0); x <= x1; x++) {
+    if (y < 0 || x + t.w > w || y + t.h > h) continue;
+    let seen = 0, k = 0;
+    for (; k < t.n; k++) {
+      const p = (y + t.pts[k * 5 + 1]) * w + x + t.pts[k * 5];
+      if (ring[p]) continue;
+      if (!same(d, p * 4, t.pts[k * 5 + 2], t.pts[k * 5 + 3], t.pts[k * 5 + 4], 8)) break;
+      seen++;
+    }
+    if (k === t.n && seen >= t.n * 0.45) hits.push({ ch: t.key, x, y, w: t.w, h: t.h, t });
+  }
+  // 틀에 가려진 부분 때문에 두 숫자(3과 8 등)가 모두 맞으면 확실하지 않은 것으로 알린다
+  const unsure = hits.some(a => hits.some(b => a !== b && a.x === b.x && a.y === b.y));
+  return { runs: digitRuns(hits, mask, w), unsure };
 }
 
 /* ---------- 아이템 아이콘 ---------- */
@@ -342,7 +390,9 @@ function findGrid(img) {
     let bgN = 0, border = 0;
     for (let yy = y; yy < y + CELL; yy += 2) for (let xx = x; xx < x + CELL; xx += 2) if (isG((yy * w + xx) * 4)) bgN++;
     for (let k = 0; k < CELL; k++) { if (isB(((y + k) * w + x) * 4)) border++; if (isB((y * w + x + k) * 4)) border++; }
-    if (bgN >= 25) cells.push({ x, y, w: CELL, h: CELL });
+    // 주황색 틀이 둘린 칸은 바탕이 덜 보여도 칸으로 친다
+    const framed = hasFrame(img, x, y);
+    if (bgN >= 25 || framed) cells.push(framed ? { x, y, w: CELL, h: CELL, framed } : { x, y, w: CELL, h: CELL });
     else if (border < 6) covered++; // 칸 바탕도 테두리도 안 보임 = 다른 창 등에 가려짐
   }
   if (!cells.length) return null;
@@ -450,7 +500,7 @@ function partialDigitIn(img, mask, hide, c, digits, dy) {
 
 // 화면 쪽에 알려 줄 "가려진 곳" 목록
 function findWarnings(ctx, tpl) {
-  const { img, mask, grid, known, coin, meso, kind, digitDy, cellRuns } = ctx, warn = {};
+  const { img, mask, grid, known, coin, meso, kind, digitDy, cellRuns, unsure } = ctx, warn = {};
   if (!grid) return warn;
   const { w } = img;
   if (!coin) warn.meso = 'hidden';                 // 동전·메소 칸이 안 보임
@@ -499,7 +549,8 @@ function findWarnings(ctx, tpl) {
     if (!r) return slotHidden(c.x + 1, y0);
     return (r.x - c.x >= dw && slotHidden(r.x - dw, y0)) || slotHidden(r.x + r.w, y0);
   };
-  const hiddenCounts = content.filter(c => cursorOnDigits(c) || partialDigitIn(img, mask, hide, c, tpl.digits, digitDy)).length;
+  // unsure: 주황색 틀에 앞자리가 가려져 확실히 읽지 못한 칸
+  const hiddenCounts = content.filter(c => cursorOnDigits(c) || partialDigitIn(img, mask, hide, c, tpl.digits, digitDy)).length + (unsure || 0);
   if (hiddenCounts) warn.counts = hiddenCounts;
   // 메소 숫자 위에 커서
   if (mesoBox && cursorOver(mesoBox.x0, mesoBox.y0, mesoBox.x1, mesoBox.y1)) warn.meso = 'unreadable';
@@ -511,12 +562,12 @@ function findWarnings(ctx, tpl) {
 /* ---------- 선택된 탭 ---------- */
 // 인벤토리 창 위쪽 탭 줄(첫 칸보다 7~27px 위)에서 붉게 칠해진 탭 = 지금 보고 있는 탭
 // 탭은 왼쪽부터 장비·소비·설치·기타·캐시·꾸미기, 첫 칸 왼쪽 6px 앞에서 시작해 33px 간격
-// 칸이 4열 모두 보일 때만 믿는다: 첫 열이 잘리거나 가려지면 탭 위치가 한 칸씩 밀리기 때문
+// 칸이 5열 모두 보일 때만 믿는다: 첫 열이 잘리거나 가려지면 탭 위치가 한 칸씩 밀리기 때문
 const TABS = ['equip', 'use', 'setup', 'etc', 'cash', 'deco'];
 function activeTab(img, gb) {
   const { w, h, d } = img;
   const y0 = gb.y0 - 27, y1 = gb.y0 - 7;
-  if (y0 < 0 || gb.x1 - gb.x0 < 36 * 3 + CELL - 2) return null; // 칸 간격 36px × 3 + 칸 32px
+  if (y0 < 0 || gb.x1 - gb.x0 < 36 * 4 + CELL - 2) return null; // 5열 = 칸 간격 36px × 4 + 칸 32px
   const red = TABS.map((_, k) => {
     let n = 0;
     const xa = gb.x0 - 6 + 33 * k + 4, xb = xa + 25;
@@ -588,7 +639,20 @@ export function analyze(img, tpl, withWarn = true) {
   const lap = k => { const n = now(); T[k] = Math.round(n - t); t = n; };
   const buckets = colorBuckets(img, tpl.colors); lap('buckets');
   const { runs, mask } = findDigits(img, tpl.digits, buckets); lap('digits');
-  const grid = findGrid(img); lap('grid');
+  const grid = findGrid(img); let unsure = 0;
+  // 주황색 틀이 둘린 칸: 틀 자리는 비교에서 빼고, 틀 때문에 놓친 개수 숫자를 다시 찾는다
+  if (grid && grid.some(c => c.framed)) {
+    const ring = new Uint8Array(img.w * img.h), widest = rs => Math.max(0, ...rs.map(r => r.w)); unsure = 0;
+    for (const c of grid) if (c.framed) {
+      maskFrame(img, ring, c);
+      // 틀을 빼고 읽은 숫자가 더 길 때만(= 앞자리가 틀에 덮였던 것) 바꾼다
+      const old = runs.filter(r => r.x >= c.x - 2 && r.x <= c.x + 26 && r.y >= c.y + 10 && r.y <= c.y + 24);
+      const again = framedDigits(img, ring, mask, c, tpl.digits);
+      if (widest(again.runs) > widest(old)) { for (const r of old) runs.splice(runs.indexOf(r), 1); runs.push(...again.runs); if (again.unsure) unsure++; }
+    }
+    for (let p = 0; p < ring.length; p++) if (ring[p]) mask[p] = 1;
+  }
+  lap('grid');
   const isInventory = !!(grid && grid.length >= 4);
   let gb = null;
   if (isInventory) gb = {
@@ -654,7 +718,7 @@ export function analyze(img, tpl, withWarn = true) {
   const digitDy = dyKeys.length ? +dyKeys.sort((a, b) => dys[b] - dys[a])[0] : null;
   const result = { kind, tab, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn: {}, w: img.w, h: img.h, timings: T };
   // 가려진 곳 검사에 필요한 것들 (화면 쪽으로는 보내지 않는다)
-  Object.defineProperty(result, 'ctx', { value: { img, mask, grid: isInventory ? grid : null, known, coin, meso, kind, digitDy, cellRuns }, enumerable: false });
+  Object.defineProperty(result, 'ctx', { value: { img, mask, grid: isInventory ? grid : null, known, coin, meso, kind, digitDy, cellRuns, unsure }, enumerable: false });
   if (withWarn) addWarnings(result, tpl);
   return result;
 }

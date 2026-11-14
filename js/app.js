@@ -763,6 +763,8 @@ renderHistory();
     if (im.res && im.res.v === VERSION) results.set(im.id, im.res);
     else { await runAnalysis(im); redone = true; }
   }
+  // 다시 인식하는 동안 새 사진을 넣었으면 같은 종류가 둘이 될 수 있다 → 나중 것만 남긴다
+  for (const s of SIDES) for (const im of [...cur[s].images]) if (replaceSameKind(s, im)) redone = true;
   if (redone) saveCur(); // 다시 인식한 결과를 저장해 두어 다음 새로고침에는 바로 보이게
   render();
 })();
