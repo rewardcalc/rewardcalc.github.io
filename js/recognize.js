@@ -33,18 +33,18 @@ const GULIM = {
 
 /* ---------- 이미지 → 픽셀 ---------- */
 // 화면(main)과 백그라운드 작업(worker) 어디서든 쓸 수 있는 캔버스
-export function makeCanvas(w, h) {
+function makeCanvas(w, h) {
   if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(w, h);
   const c = document.createElement('canvas'); c.width = w; c.height = h; return c;
 }
-export function bitmapPixels(bmp) {
+function bitmapPixels(bmp) {
   const w = bmp.width, h = bmp.height, c = makeCanvas(w, h);
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(bmp, 0, 0);
   return { w, h, d: ctx.getImageData(0, 0, w, h).data };
 }
-export async function pixelsFromSource(src) {
-  const blob = src instanceof Blob ? src : await (await fetch(src)).blob();
+async function pixelsFromSource(src) {
+  const blob = await (await fetch(src)).blob();
   return bitmapPixels(await createImageBitmap(blob));
 }
 
@@ -147,7 +147,8 @@ function candidates(img, buckets, t, src, tol = TOL) {
 function allPrimaryColors(tpl) {
   const cols = [];
   const add = s => s.primary.forEach(k => cols.push(s.pts.slice(k * 5 + 2, k * 5 + 5)));
-  for (const t of tpl.icons) { add(t); add(t.quick); }
+  // 퀵슬롯 찾기는 소비 아이템만 하므로 기타 아이템의 퀵슬롯용 색은 필요 없다
+  for (const t of tpl.icons) { add(t); if (!String(t.key).startsWith('e:')) add(t.quick); }
   for (const t of tpl.digits) add(t);
   add(tpl.coin);
   return cols;
@@ -159,18 +160,18 @@ function allPrimaryColors(tpl) {
 export async function loadTemplates(icons, base = (typeof location !== 'undefined' ? location.href : '')) {
   const load = async url => { try { return await pixelsFromSource(url); } catch (e) { return await pixelsFromSource(url + '?r=1'); } };
   const abs = p => new URL(p, base).href;
-  // 작은 이미지 100여 개를 16개씩 동시에 불러온다
-  const tIcons = [], digits = [];
-  for (let i = 0; i < icons.length; i += 16) {
-    const batch = await Promise.all(icons.slice(i, i + 16).map(async ic => makeTemplate(ic.key, await load(ic.url))));
-    tIcons.push(...batch);
+  // 아이콘·숫자·동전·커서 140여 개를 48개씩 동시에 불러온다 (실패한 것은 load가 한 번 더 시도)
+  const list = [
+    ...icons.map(ic => ({ key: ic.key, url: ic.url, group: 'icons' })),
+    ...[...'0123456789'].map(d => ({ key: d, url: abs(`assets/digit/${d}.png`), group: 'digits' })),
+    { key: 'coin', url: abs('assets/coin.png'), group: 'coin' },
+    ...['normal', 'hover0', 'hover1', 'hover2', 'hover3', 'press', 'grab0', 'grab1', 'grab2'].map(c => ({ key: c, url: abs(`assets/cursor/${c}.png`), group: 'cursors' }))
+  ];
+  const tpl = { icons: [], digits: [], coin: null, cursors: [] };
+  for (let i = 0; i < list.length; i += 48) {
+    const batch = await Promise.all(list.slice(i, i + 48).map(async e => ({ e, t: makeTemplate(e.key, await load(e.url)) })));
+    for (const { e, t } of batch) e.group === 'coin' ? (tpl.coin = t) : tpl[e.group].push(t);
   }
-  const icons_ = tIcons;
-  for (const d of '0123456789') digits.push(makeTemplate(d, await load(abs(`assets/digit/${d}.png`))));
-  const coin = makeTemplate('coin', await load(abs('assets/coin.png')));
-  const cursors = [];
-  for (const c of ['normal', 'hover0', 'hover1', 'hover2', 'hover3', 'press', 'grab0', 'grab1', 'grab2']) cursors.push(makeTemplate(c, await load(abs(`assets/cursor/${c}.png`))));
-  const tpl = { icons: icons_, digits, coin, cursors };
   tpl.colors = allPrimaryColors(tpl);
   return tpl;
 }
@@ -625,7 +626,7 @@ export function analyze(img, tpl, withWarn = true) {
   if (withWarn) addWarnings(result, tpl);
   return result;
 }
-export function addWarnings(result, tpl) {
+function addWarnings(result, tpl) {
   const t0 = performance.now();
   result.warn = findWarnings(result.ctx, tpl);
   result.timings.warn = Math.round(performance.now() - t0);

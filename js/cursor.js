@@ -72,7 +72,8 @@ export function initCursor() {
     else { releaseTimer = null; update(target); }
   };
 
-  addEventListener('pointermove', e => { move(e); update(e.target); }, { passive: true });
+  // 위치는 매번 옮기고, 모양(손가락/누름 등)은 가리키는 요소가 바뀔 때만 다시 고른다
+  addEventListener('pointermove', e => { move(e); if (e.target !== lastTarget) update(e.target); }, { passive: true });
   addEventListener('pointerdown', e => { if (e.button !== 0) return; down = true; pressedAt = performance.now(); move(e); update(e.target); });
   addEventListener('pointerup', e => { if (e.button !== 0) return; release(e.target); });
   // 파일 선택 창이 열리는 등 손을 뗀 신호를 못 받는 경우

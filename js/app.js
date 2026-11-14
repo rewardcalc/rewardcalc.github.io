@@ -23,9 +23,9 @@ const store = {
 // 지금 올려 둔 사진은 sessionStorage: 새로고침하면 남고, 브라우저(탭)를 완전히 닫았다 열면 지워진다
 const sess = {
   get(k, d) { try { const v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
-  set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } }
+  set(k, v, replacer) { try { sessionStorage.setItem(k, JSON.stringify(v, replacer)); return true; } catch { return false; } }
 };
-const K = { cur: 'pmt2.current', hist: 'pmt2.history', prices: 'pmt2.prices', eprices: 'pmt2.etcPrices', theme: 'pmt2.theme', guide: 'pmt2.guideSeen' };
+const K = { cur: 'pmt2.current', hist: 'pmt2.history', prices: 'pmt2.prices', eprices: 'pmt2.etcPrices', theme: 'pmt2.theme' };
 
 /* ---------- 아이템 데이터 ---------- */
 const USE = Object.fromEntries(ITEMS.map(i => [i.id, i]));
@@ -57,12 +57,11 @@ const pending = new Set();          // 인식 중인 이미지 id
 let activeSide = cur.before.images.length ? 'after' : 'before';
 
 // 저장할 때는 화면에서만 쓰는 값(_로 시작: 썸네일 주소, 사진 원본)은 뺀다
-const persistable = () => JSON.parse(JSON.stringify(cur, (k, v) => k.startsWith('_') ? undefined : v));
+const skipLocal = (k, v) => k.startsWith('_') ? undefined : v;
 function saveCur() {
-  const data = persistable();
-  if (!sess.set(K.cur, data)) {
-    // 그래도 너무 크면 사진은 빼고 저장 (새로고침하면 다시 올려야 함)
-    sess.set(K.cur, { ...data, before: { images: [] }, after: { images: [] } });
+  if (!sess.set(K.cur, cur, skipLocal)) {
+    // 너무 크면 사진은 빼고 저장 (새로고침하면 다시 올려야 함)
+    sess.set(K.cur, { ...cur, before: { images: [] }, after: { images: [] } });
   }
 }
 
@@ -594,21 +593,18 @@ $('#viewer').addEventListener('click', e => { if (e.target.id === 'viewer') clos
 addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#viewer').hidden) closeViewer(); });
 
 /* ---------- 시작 ---------- */
-// 예전 버전에서 저장된 사진의 종류 정보 정리 (같은 종류가 여럿이면 마지막 것만)
 applyTheme();
 initCursor();
 setActive(activeSide);
 render();
 renderHistory();
 (async () => {
-  // 새로고침 전에 넣어 둔 사진 다시 인식 (저장하지 못한 큰 사진은 뺀다)
+  // 새로고침 전에 넣어 둔 사진: 저장해 둔 인식 결과를 그대로 쓰고, 인식 방식이 바뀌었으면 다시 인식
+  // (저장하지 못한 큰 사진은 뺀다)
   for (const s of SIDES) cur[s].images = cur[s].images.filter(im => im.dataURL);
   for (const s of SIDES) for (const im of cur[s].images) {
-    if (im.res && im.res.v === VERSION) results.set(im.id, im.res); // 저장해 둔 결과 그대로
+    if (im.res && im.res.v === VERSION) results.set(im.id, im.res);
     else await runAnalysis(im);
   }
-  let changed = false;
-  for (const s of SIDES) for (const im of [...cur[s].images].reverse()) if (cur[s].images.includes(im) && replaceSameKind(s, im)) changed = true;
-  if (changed) saveCur();
   render();
 })();
