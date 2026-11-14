@@ -80,7 +80,8 @@ export function initCursor() {
   addEventListener('blur', () => { if (down) release(lastTarget); });
   addEventListener('pointercancel', () => release(lastTarget));
   document.addEventListener('pointerleave', () => { el.hidden = true; });
-  document.addEventListener('pointerenter', () => { el.hidden = false; });
+  // 다시 들어올 때 글자 입력 칸 위라면 게임 커서를 숨긴 채로 둔다
+  document.addEventListener('pointerenter', e => { el.hidden = false; move(e); update(document.elementFromPoint(e.clientX, e.clientY)); });
   // 바탕화면에서 파일을 끌고 들어올 때 잡는 손
   addEventListener('dragenter', e => { dragging++; move(e); update(); });
   addEventListener('dragover', e => { move(e); });

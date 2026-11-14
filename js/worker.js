@@ -6,11 +6,12 @@
 import { loadTemplates, processBlob } from './recognize.js';
 
 let tplPromise = null;
-const templates = (icons, base) => (tplPromise ||= loadTemplates(icons, base));
+// 아이콘을 못 받아 준비에 실패하면 기억하지 않고 다음 요청 때 다시 시도한다
+const templates = (icons, base) => (tplPromise ||= loadTemplates(icons, base).catch(err => { tplPromise = null; throw err; }));
 
 self.onmessage = async e => {
   const m = e.data;
-  if (m.type === 'warm') { templates(m.icons, m.base).catch(() => { tplPromise = null; }); return; }
+  if (m.type === 'warm') { templates(m.icons, m.base).catch(() => {}); return; }
   try {
     const tpl = await templates(m.icons, m.base);
     const out = await processBlob(m.blob, tpl);

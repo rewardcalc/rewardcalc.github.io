@@ -14,7 +14,7 @@ const CELL_BORDER = [0xCE, 0xC9, 0xBE]; // 인벤토리 칸 왼쪽/위쪽 테두
 const CELL_BG = [0xE1, 0xDF, 0xD5];     // 인벤토리 칸 바탕
 const CELL = 32;                        // 칸 크기
 // 인식 방식이 바뀌면 올린다 → 저장해 둔 인식 결과를 버리고 다시 인식
-export const VERSION = 2;
+export const VERSION = 3;
 
 // 메소 칸 숫자(굴림 11px) 모양
 const GULIM = {
@@ -44,8 +44,9 @@ function bitmapPixels(bmp) {
   return { w, h, d: ctx.getImageData(0, 0, w, h).data };
 }
 async function pixelsFromSource(src) {
-  const blob = await (await fetch(src)).blob();
-  return bitmapPixels(await createImageBitmap(blob));
+  const res = await fetch(src);
+  if (!res.ok) throw new Error(`${res.status} ${src}`);
+  return bitmapPixels(await createImageBitmap(await res.blob()));
 }
 
 function makeTemplate(key, px) {
@@ -169,8 +170,12 @@ export async function loadTemplates(icons, base = (typeof location !== 'undefine
   ];
   const tpl = { icons: [], digits: [], coin: null, cursors: [] };
   for (let i = 0; i < list.length; i += 48) {
-    const batch = await Promise.all(list.slice(i, i + 48).map(async e => ({ e, t: makeTemplate(e.key, await load(e.url)) })));
-    for (const { e, t } of batch) e.group === 'coin' ? (tpl.coin = t) : tpl[e.group].push(t);
+    // 아이템 아이콘 하나를 못 받으면 그 아이템만 빼고 계속한다 (숫자·동전·커서는 꼭 있어야 한다)
+    const batch = await Promise.all(list.slice(i, i + 48).map(async e => {
+      try { return { e, t: makeTemplate(e.key, await load(e.url)) }; }
+      catch (err) { if (e.group === 'icons') { console.warn('icon skipped', e.url); return null; } throw err; }
+    }));
+    for (const b of batch) if (b) b.e.group === 'coin' ? (tpl.coin = b.t) : tpl[b.e.group].push(b.t);
   }
   tpl.colors = allPrimaryColors(tpl);
   return tpl;
@@ -286,10 +291,10 @@ function findGrid(img) {
   const isB = p => Math.abs(d[p] - br) <= 4 && Math.abs(d[p + 1] - bgg) <= 4 && Math.abs(d[p + 2] - bb) <= 4;
   const isG = p => Math.abs(d[p] - gr) <= 4 && Math.abs(d[p + 1] - gg) <= 4 && Math.abs(d[p + 2] - gb) <= 4;
   const hx = [], hy = [];
-  for (let y = 0; y < h - 1; y++) for (let x = 0, p = y * W4; x < w - 1; x++, p += 4) {
+  scan: for (let y = 0; y < h - 1; y++) for (let x = 0, p = y * W4; x < w - 1; x++, p += 4) {
     if (Math.abs(d[p] - br) > 4) continue; // 빨강 값만으로 먼저 거른다
     if (isB(p) && isB(p + 4) && isB(p + W4) && isG(p + W4 + 4)) { hx.push(x); hy.push(y); }
-    if (hx.length > 2000) break;
+    if (hx.length > 2000) break scan;
   }
   const N = hx.length;
   if (N < 2) return null;
@@ -503,6 +508,28 @@ function findWarnings(ctx, tpl) {
   return warn;
 }
 
+/* ---------- 선택된 탭 ---------- */
+// 인벤토리 창 위쪽 탭 줄(첫 칸보다 7~27px 위)에서 붉게 칠해진 탭 = 지금 보고 있는 탭
+// 탭은 왼쪽부터 장비·소비·설치·기타·캐시·꾸미기, 첫 칸 왼쪽 6px 앞에서 시작해 33px 간격
+const TABS = ['equip', 'use', 'setup', 'etc', 'cash', 'deco'];
+function activeTab(img, gb) {
+  const { w, h, d } = img;
+  const y0 = gb.y0 - 27, y1 = gb.y0 - 7;
+  if (y0 < 0) return null;
+  const red = TABS.map((_, k) => {
+    let n = 0;
+    const xa = gb.x0 - 6 + 33 * k + 4, xb = xa + 25;
+    for (let y = y0; y < y1 && y < h; y++) for (let x = Math.max(0, xa); x < xb && x < w; x++) {
+      const i = (y * w + x) * 4, r = d[i], g = d[i + 1], b = d[i + 2];
+      if (r > 150 && r - g > 50 && r - b > 30) n++;
+    }
+    return n;
+  });
+  const best = red.indexOf(Math.max(...red));
+  const second = Math.max(...red.filter((_, k) => k !== best));
+  return red[best] >= 60 && red[best] >= second * 3 ? TABS[best] : null;
+}
+
 /* ---------- 메소 ---------- */
 // near가 있으면 인벤토리 칸 바로 아래에 있는 동전만, 없으면 가장 아래쪽 동전
 function findCoin(img, coin, buckets, near) {
@@ -614,13 +641,16 @@ export function analyze(img, tpl, withWarn = true) {
   const nEtc = known.filter(k => String(k.icon).startsWith('e:')).length;
   const nUse = known.length - nEtc;
   let kind;
-  if (isInventory) kind = nEtc > nUse ? 'etc' : nUse ? 'use' : quick.length ? 'use' : 'unknown';
+  // 인벤토리 창은 위쪽의 선택된 탭(붉은색)으로 소비/기타를 정한다 → 텅 빈 창도 바르게 구분
+  // 탭을 못 찾으면 들어 있는 아이템으로 짐작하고, 아이템이 없으면 '모름'(사용자가 고르게)
+  const tab = isInventory ? activeTab(img, gb) : null;
+  if (isInventory) kind = tab === 'use' || tab === 'etc' ? tab : tab ? 'unknown' : nEtc > nUse ? 'etc' : nUse ? 'use' : 'unknown';
   else kind = nUse ? 'quick' : 'unknown';
   lap('quick');
 
   const dyKeys = Object.keys(dys);
   const digitDy = dyKeys.length ? +dyKeys.sort((a, b) => dys[b] - dys[a])[0] : null;
-  const result = { kind, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn: {}, w: img.w, h: img.h, timings: T };
+  const result = { kind, tab, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn: {}, w: img.w, h: img.h, timings: T };
   // 가려진 곳 검사에 필요한 것들 (화면 쪽으로는 보내지 않는다)
   Object.defineProperty(result, 'ctx', { value: { img, mask, grid: isInventory ? grid : null, known, coin, meso, kind, digitDy, cellRuns }, enumerable: false });
   if (withWarn) addWarnings(result, tpl);

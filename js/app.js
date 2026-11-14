@@ -78,7 +78,7 @@ try {
 // 백그라운드 작업을 못 쓰는 브라우저에서는 화면 쪽에서 직접 분석
 let localTpl = null;
 async function analyzeHere(blob) {
-  localTpl ||= loadTemplates(ICON_URLS, location.href);
+  localTpl ||= loadTemplates(ICON_URLS, location.href).catch(err => { localTpl = null; throw err; });
   return processBlob(blob, await localTpl);
 }
 function analyzeBlob(blob) {
@@ -140,36 +140,72 @@ addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#guide').hidden
 const readAsDataURL = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
 const kindOf = im => im.kind || (results.get(im.id) || {}).kind || 'unknown';
 
-// 같은 쪽에 같은 종류(소비/기타/퀵슬롯) 사진이 이미 있으면 새 사진으로 바꾼다
+// 같은 쪽에 같은 종류(소비/기타/퀵슬롯) 사진이 여럿이면 가장 나중에 넣은 것(seq가 큰 것)만 남긴다.
+// 인식이 끝나는 순서와 상관없이 늘 나중에 넣은 사진이 이긴다.
+// 돌려주는 값: 빠진 사진이 있으면 true
+let seqNo = 0;
+const nextSeq = () => Date.now() * 1000 + (seqNo++ % 1000);
+const seqOf = (side, im) => im.seq ?? cur[side].images.indexOf(im); // 예전에 저장된 사진은 순서대로
 function replaceSameKind(side, im) {
   const k = kindOf(im);
-  if (k === 'unknown') return false;
-  const old = cur[side].images.filter(x => x !== im && kindOf(x) === k);
-  if (!old.length) return false;
-  cur[side].images = cur[side].images.filter(x => !old.includes(x));
-  old.forEach(dropImage);
+  if (k === 'unknown' || !cur[side].images.includes(im)) return false;
+  const same = cur[side].images.filter(x => kindOf(x) === k && !pending.has(x.id));
+  if (same.length < 2) return false;
+  const newest = same.reduce((a, b) => seqOf(side, b) > seqOf(side, a) ? b : a);
+  const drop = same.filter(x => x !== newest);
+  cur[side].images = cur[side].images.filter(x => !drop.includes(x));
+  drop.forEach(dropImage);
   return true;
 }
-function dropImage(im) { results.delete(im.id); if (im._url) URL.revokeObjectURL(im._url); }
+function dropImage(im) { results.delete(im.id); if (im._url) { URL.revokeObjectURL(im._url); im._url = null; } }
 const thumbURL = im => im._url || (im._url = im._blob ? URL.createObjectURL(im._blob) : im.dataURL || '');
 
+// 사진이 바뀌면 그 쪽에서 그 사진으로 읽은 값을 직접 고쳐 둔 것은 지운다 (새 사진 값을 쓰도록)
+//  소비 창·퀵슬롯 → 물약 개수, 기타 창 → 기타 아이템 개수, 소비·기타 창 → 메소
+function clearEdits(side, kind) {
+  const ed = cur.edits[side]; let n = 0;
+  for (const key of Object.keys(ed)) {
+    const hit = key === 'meso' ? (kind === 'use' || kind === 'etc')
+      : key.startsWith('i:') ? (kind === 'use' || kind === 'quick')
+      : key.startsWith('e:') ? kind === 'etc' : false;
+    if (hit) { delete ed[key]; n++; }
+  }
+  return n;
+}
+
+let generation = 0; // [새로 시작]을 누르면 바뀐다 → 그 전에 넣던 사진은 버린다
 async function addFiles(side, files) {
   const list = [...files].filter(f => f.type && f.type.startsWith('image/'));
   if (!list.length) { toast('이미지 파일만 올릴 수 있어요.'); return; }
   setActive(side);
-  const msgs = [], added = [];
+  const gen = generation, msgs = [], added = [];
+  let cleared = 0;
   for (const f of list) {
-    const entry = { id: uid(), name: f.name || '붙여넣은 이미지', dataURL: null, kind: null, _blob: f };
+    if (gen !== generation) return;
+    const entry = { id: uid(), seq: nextSeq(), name: f.name || '붙여넣은 이미지', dataURL: null, kind: null, _blob: f };
     cur[side].images.push(entry); added.push(entry);
     await runAnalysis(entry);
-    if (replaceSameKind(side, entry)) msgs.push(`${SIDE_KO[side]} ${KIND_KO[kindOf(entry)]} 사진을 새 사진으로 바꿨어요.`);
+    // 인식하는 동안 사진을 빼거나 [새로 시작]을 눌렀으면 아무것도 하지 않는다
+    if (gen !== generation || !cur[side].images.includes(entry)) { dropImage(entry); continue; }
+    const kind = kindOf(entry);
+    if (kind !== 'unknown') cleared += clearEdits(side, kind);
+    if (replaceSameKind(side, entry)) msgs.push(cur[side].images.includes(entry)
+      ? `${SIDE_KO[side]} ${KIND_KO[kind]} 사진을 새 사진으로 바꿨어요.`
+      : `${SIDE_KO[side]} ${KIND_KO[kind]} 사진은 더 나중에 넣은 사진을 쓸게요.`);
   }
   saveCur();
   render();
+  const kept = added.filter(im => cur[side].images.includes(im));
+  if (!kept.length) return;
   // 가려진 곳이 있으면 아래에 잠시 빨간 알림
-  const warned = added.map(im => warnMessage(results.get(im.id))).find(Boolean);
+  const warned = kept.map(im => warnMessage(results.get(im.id))).find(Boolean);
+  const unknown = kept.filter(im => kindOf(im) === 'unknown');
   if (warned) toast(warned, { warn: true, ms: 6000 });
-  else if (msgs.length) toast(msgs[msgs.length - 1]);
+  else if (unknown.length) toast(results.get(unknown[0].id)?.error ? '이미지를 읽지 못했어요. 다른 파일로 다시 넣어 주세요.'
+    : results.get(unknown[0].id)?.inventory ? '인벤토리 창은 찾았는데 아는 아이템이 없어요. 사진 옆 목록에서 소비 창/기타 창을 골라 주세요.'
+    : '사진에서 인벤토리나 퀵슬롯을 찾지 못했어요. 게임 화면을 확대·축소 없이 원본 크기로 캡처해 주세요.', { warn: true, ms: 6000 });
+  else if (msgs.length) toast(msgs[msgs.length - 1] + (cleared ? ' 직접 고친 숫자는 새 사진 기준으로 되돌렸어요.' : ''));
+  else if (cleared) toast('새 사진을 넣어서, 직접 고친 숫자는 새 사진 기준으로 되돌렸어요.');
   else if (side === 'before' && !cur.after.images.length) toast('사냥 전 사진을 넣었어요. 사냥이 끝나면 "사냥 후" 칸에 넣어 주세요.');
 }
 
@@ -198,16 +234,26 @@ async function runAnalysis(entry) {
 }
 
 /* ---------- 한쪽(전/후) 합산 ---------- */
+// 같은 종류 사진이 여럿이면(종류를 손으로 바꾼 경우 등) 가장 나중에 넣은 것만 계산에 쓴다
+function usedImages(side) {
+  const best = {}, rest = [];
+  for (const im of cur[side].images) {
+    if (pending.has(im.id) || !results.get(im.id)) continue;
+    const k = kindOf(im);
+    if (k === 'unknown') { rest.push(im); continue; }
+    if (!best[k] || seqOf(side, im) > seqOf(side, best[k])) best[k] = im;
+  }
+  return [...Object.values(best), ...rest];
+}
 function aggregate(side) {
   let meso = null, mesoFromUse = false;
   const inv = new Map(), quick = new Map(), etc = new Map();
-  let hasUse = false, hasEtc = false;
-  for (const im of cur[side].images) {
+  let hasInv = false, hasEtc = false;
+  for (const im of usedImages(side)) {
     const r = results.get(im.id);
-    if (!r) continue;
     const kind = kindOf(im);
     if (r.meso != null && (meso == null || (kind === 'use' && !mesoFromUse))) { meso = r.meso; mesoFromUse = kind === 'use'; }
-    if (kind === 'use' || kind === 'quick') hasUse = true;
+    if (kind === 'use') hasInv = true;
     if (kind === 'etc') hasEtc = true;
     for (const k of r.known) {
       const it = ICON[k.icon]; if (!it) continue;
@@ -224,16 +270,20 @@ function aggregate(side) {
   // 같은 아이템은 한 번만: 퀵슬롯 숫자(그 아이템 전체 개수)가 있으면 그것, 없으면 인벤토리 칸 합계
   const items = new Map(inv);
   for (const [id, n] of quick) items.set(id, n);
-  return { meso, inv, quick, items, etc, hasUse, hasEtc };
+  // hasUse: 물약 개수를 알 수 있는 사진(소비 창 또는 퀵슬롯)이 있음
+  return { meso, inv, quick, items, etc, hasInv, hasUse: hasInv || quick.size > 0, hasEtc };
 }
 
 // 한 아이템의 사냥 전·후 개수는 같은 기준으로 비교한다
-// 양쪽 모두 퀵슬롯에 있으면 퀵슬롯 숫자, 아니면 인벤토리 칸 합계 (인벤토리에 없으면 퀵슬롯 숫자)
+//  - 양쪽 모두 퀵슬롯에 있으면 퀵슬롯 숫자
+//  - 소비 창 사진이 있는 쪽: 인벤토리 칸 합계 (없으면 퀵슬롯 숫자, 둘 다 없으면 0개)
+//  - 퀵슬롯 사진만 있는 쪽: 퀵슬롯에 없는 아이템은 개수를 모름(null) → 계산에서 뺀다
 function pickCounts(A, id) {
   const bothQuick = A.before.quick.has(id) && A.after.quick.has(id);
   const one = s => bothQuick ? A[s].quick.get(id)
     : A[s].inv.has(id) ? A[s].inv.get(id)
-    : A[s].quick.has(id) ? A[s].quick.get(id) : 0;
+    : A[s].quick.has(id) ? A[s].quick.get(id)
+    : A[s].hasInv ? 0 : null;
   return { b: one('before'), a: one('after'), src: bothQuick ? 'quick' : 'inv' };
 }
 
@@ -255,8 +305,9 @@ function compute() {
     const pc = pickCounts(A, id), rb = pc.b, ra = pc.a;
     const b = val('before', key, rb), a = val('after', key, ra);
     const price = prices[id] != null ? prices[id] : (it.buy != null ? it.buy : 0);
-    const delta = a - b;
-    return { id, it, key, rb, ra, b, a, delta, price, value: delta * price, src: pc.src };
+    // 한쪽 개수를 모르면(그쪽에 소비 창 사진이 없고 퀵슬롯에도 없음) 변화를 계산하지 않는다
+    const delta = a != null && b != null ? a - b : null;
+    return { id, it, key, rb, ra, b, a, delta, price, value: delta == null ? 0 : delta * price, src: pc.src, unknown: delta == null };
   });
 
   // 기타 아이템: 사냥 후 기타 창만 있어도 계산한다
@@ -302,6 +353,9 @@ function setActive(side) {
 
 function shotDesc(im) {
   const d = shotDescBase(im), r = results.get(im.id);
+  const side = SIDES.find(s => cur[s].images.includes(im));
+  if (side && r && !pending.has(im.id) && kindOf(im) !== 'unknown' && !usedImages(side).includes(im))
+    return { text: '같은 종류의 더 나중 사진을 쓰고 있어서 계산에 쓰지 않아요', warn: true };
   if (!pending.has(im.id) && r && r.warn && Object.keys(r.warn).length && !d.warn) return { text: d.text + ' · 일부가 가려졌어요, 다시 캡처해 주세요', warn: true };
   return d;
 }
@@ -352,10 +406,12 @@ function renderSide(side, agg) {
   scaleIcons(card);
 }
 
-function numInput(side, key, value, rec) {
+// name: 화면 읽기 프로그램용 이름 (어느 아이템의 칸인지)
+function numInput(side, key, value, rec, name) {
   const edited = cur.edits[side][key] != null;
-  return `<input class="num ${edited ? 'edited' : ''}" type="text" inputmode="numeric" data-side="${side}" data-key="${key}"
-    value="${value == null ? '' : fmt(value)}" placeholder="${rec == null ? '' : fmt(rec)}" title="${edited ? `직접 고친 값 (인식: ${rec == null ? '-' : fmt(rec)})` : '눌러서 고치기'}" aria-label="${SIDE_KO[side]} ${key === 'meso' ? '메소' : '개수'}">`;
+  const label = key === 'meso' ? `${SIDE_KO[side]} 메소` : `${name} ${SIDE_KO[side]} 개수`;
+  return `<input class="num ${edited ? 'edited' : ''}" type="text" inputmode="numeric" maxlength="13" data-side="${side}" data-key="${key}"
+    value="${value == null ? '' : fmt(value)}" placeholder="${rec == null ? '?' : fmt(rec)}" title="${edited ? `직접 고친 값 (인식: ${rec == null ? '-' : fmt(rec)})` : rec == null ? '사진으로 알 수 없어요. 눌러서 직접 넣기' : '눌러서 고치기'}" aria-label="${esc(label)}">`;
 }
 const trTag = it => it.tr ? '<span class="tag" title="한국 메이플에 없는 아이템이라 직접 번역한 이름">번역</span>' : '';
 
@@ -368,10 +424,10 @@ function effect(it) {
 function rowHTML(r, img, sub, priceAttr, priceTitle) {
   return `<tr>
     <td><div class="item-name"><span class="ic px"><img src="${img}" alt=""></span><span>${esc(r.it.ko)}${trTag(r.it)}<small>${esc(sub)}</small></span></div></td>
-    <td>${numInput('before', r.key, r.b, r.rb)}</td>
-    <td>${numInput('after', r.key, r.a, r.ra)}</td>
-    <td class="${cls(r.delta)}"><b>${sfmt(r.delta)}</b></td>
-    <td><input class="num" type="text" inputmode="numeric" ${priceAttr}="${r.id}" value="${fmt(r.price)}" title="${esc(priceTitle)}" aria-label="${esc(r.it.ko)} 개당 가격"></td>
+    <td>${numInput('before', r.key, r.b, r.rb, r.it.ko)}</td>
+    <td>${numInput('after', r.key, r.a, r.ra, r.it.ko)}</td>
+    <td class="${cls(r.delta)}"><b>${r.delta == null ? '?' : sfmt(r.delta)}</b></td>
+    <td><input class="num" type="text" inputmode="numeric" maxlength="13" ${priceAttr}="${r.id}" value="${fmt(r.price)}" title="${esc(priceTitle)}" aria-label="${esc(r.it.ko)} 개당 가격"></td>
     <td class="${cls(r.value)}">${sfmt(r.value)}</td></tr>`;
 }
 
@@ -396,6 +452,11 @@ function renderResult(c) {
   for (const r of c.items) rows.push(rowHTML(r, useImg(r.it), effect(r.it) + (r.src === 'quick' ? ' · 퀵슬롯 숫자 기준' : ''), 'data-price', r.it.buy != null ? `NPC 상점가 ${fmt(r.it.buy)}메소` : 'NPC가 팔지 않는 아이템'));
   if (!c.useReady) rows.push('<tr><td colspan="6" class="empty">사냥 전·후 소비 창 사진을 모두 넣으면 물약 사용량도 계산해요.</td></tr>');
   else if (!c.items.length) rows.push('<tr><td colspan="6" class="empty">사진에서 물약을 찾지 못했어요.</td></tr>');
+  const unknownN = c.items.filter(r => r.unknown).length;
+  if (unknownN) {
+    const miss = SIDES.filter(s => !c.A[s].hasInv).map(s => SIDE_KO[s]).join('·');
+    rows.push(`<tr><td colspan="6" class="empty">${miss} 소비 창 사진이 없어서, 퀵슬롯에 없던 물약 ${unknownN}종은 개수를 몰라 계산에서 뺐어요. 소비 창 사진을 넣거나 "?" 칸에 개수를 넣어 주세요.</td></tr>`);
+  }
   $('#itemTable tbody').innerHTML = rows.join('');
   $('#useTitle').textContent = c.useReady ? '물약' : '메소';
 
@@ -415,7 +476,10 @@ function renderResult(c) {
       ${same.length ? `<details class="more"><summary>변화 없는 아이템 ${same.length}개 보기</summary>${table(same)}</details>` : ''}
     </div>`;
   }
+  // "변화 없는 아이템 보기"를 펼쳐 둔 채 숫자를 고쳐도 접히지 않도록
+  const wasOpen = !!$('#etcBox details.more[open]');
   $('#etcBox').innerHTML = etcHTML;
+  if (wasOpen && $('#etcBox details.more')) $('#etcBox details.more').open = true;
   scaleIcons(box);
 }
 
@@ -431,7 +495,7 @@ function renderHistory() {
     const when = `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
     const etc = (h.etc || []).filter(r => r.delta !== 0);
     // 요약 줄 아이콘: 물약 변화가 없으면(기타 창만 넣은 기록 등) 기타 아이템 변화를 보여 준다
-    const potions = h.items.filter(r => r.delta !== 0).map(r => ({ ...r, src: `assets/items/${r.icon}.png` }));
+    const potions = h.items.filter(r => r.delta).map(r => ({ ...r, src: `assets/items/${r.icon}.png` }));
     const used = potions.length ? potions : etc.map(r => ({ ...r, src: `assets/etc/${r.icon}.png` }));
     return `<details class="rec" data-id="${h.id}">
       <summary>
@@ -457,6 +521,26 @@ function render() {
   renderResult(c);
 }
 
+// 표를 다시 그려도 키보드 위치(포커스)를 잃지 않도록:
+// 칸을 고치고 Tab을 누르면 change가 먼저 오고 포커스는 그 다음 칸으로 옮겨 가므로, 옮겨 간 뒤에 다시 그리고 같은 칸을 찾아 포커스를 돌려준다
+const focusKey = el => {
+  if (!el || !el.dataset) return null;
+  if (el.dataset.key) return `[data-side="${el.dataset.side}"][data-key="${el.dataset.key}"]`;
+  if (el.dataset.price) return `[data-price="${el.dataset.price}"]`;
+  if (el.dataset.eprice) return `[data-eprice="${el.dataset.eprice}"]`;
+  const li = el.closest && el.closest('.shot');
+  if (li && el.tagName === 'SELECT') return `.shot[data-id="${li.dataset.id}"] select`;
+  return null;
+};
+function renderKeepFocus() {
+  setTimeout(() => {
+    const sel = focusKey(document.activeElement);
+    render();
+    const el = sel && $(sel);
+    if (el && el !== document.activeElement) { el.focus(); if (el.select && el.tagName === 'INPUT') el.select(); }
+  }, 0);
+}
+
 /* ---------- 이벤트 ---------- */
 for (const side of SIDES) {
   const card = $(`.side[data-side="${side}"]`), drop = $('.drop', card), input = $('input[type=file]', drop);
@@ -473,17 +557,27 @@ for (const side of SIDES) {
     const li = e.target.closest('.shot'); if (!li) return;
     const im = cur[side].images.find(x => x.id === li.dataset.id); if (!im) return;
     if (e.target.closest('.icon-btn')) {
+      const kind = kindOf(im);
       cur[side].images = cur[side].images.filter(x => x !== im); dropImage(im);
+      if (kind !== 'unknown') clearEdits(side, kind);
       saveCur(); render();
-    } else if (e.target.closest('.thumb')) openViewer(im);
+      $('.drop', card).focus(); // 지운 사진 자리 대신 올리기 칸으로
+    } else if (e.target.closest('.thumb')) openViewer(im, e.target.closest('.thumb'));
   });
   $('.shots', card).addEventListener('change', e => {
     const li = e.target.closest('.shot'); if (!li || e.target.tagName !== 'SELECT') return;
-    const im = cur[side].images.find(x => x.id === li.dataset.id);
+    const im = cur[side].images.find(x => x.id === li.dataset.id); if (!im) return;
+    const before = kindOf(im);
     im.kind = e.target.value || null;
-    if (replaceSameKind(side, im)) toast(`예전 ${KIND_KO[kindOf(im)]} 사진을 빼고 이 사진으로 바꿨어요.`);
-    saveCur(); render();
+    const after = kindOf(im);
+    if (before !== 'unknown') clearEdits(side, before);
+    if (after !== 'unknown') clearEdits(side, after);
+    // 종류를 손으로 고쳐도 다른 사진은 지우지 않는다 (같은 종류가 둘이면 나중에 넣은 사진이 쓰인다)
+    const dup = after !== 'unknown' && cur[side].images.some(x => x !== im && kindOf(x) === after);
+    if (dup) toast(`${SIDE_KO[side]}에 ${KIND_KO[after]} 사진이 두 장이에요. 필요 없는 사진은 ✕로 빼 주세요.`, { warn: true, ms: 5000 });
+    saveCur(); renderKeepFocus();
   });
+  card.addEventListener('focusin', () => setActive(side)); // 키보드로 옮겨 와도 Ctrl+V가 이쪽으로
 }
 addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => e.preventDefault());
@@ -516,8 +610,14 @@ document.addEventListener('paste', e => {
 });
 
 // 결과표에서 숫자 고치기
+const MAX_NUM = 9999999999; // 메소·개수·가격 모두 이보다 클 수 없다
 $('#result').addEventListener('change', e => {
-  const t = e.target, v = parseNum(t.value);
+  const t = e.target;
+  if (!t.dataset.key && !t.dataset.price && !t.dataset.eprice) return;
+  // 음수나 너무 큰 수는 받지 않고 원래 값으로 되돌린다
+  if (/-/.test(t.value)) { toast('0 이상의 숫자만 넣을 수 있어요.', { warn: true }); renderKeepFocus(); return; }
+  const v = parseNum(t.value);
+  if (v != null && v > MAX_NUM) { toast('숫자가 너무 커요. 다시 확인해 주세요.', { warn: true }); renderKeepFocus(); return; }
   if (t.dataset.key) {
     const ed = cur.edits[t.dataset.side];
     if (v == null) delete ed[t.dataset.key]; else ed[t.dataset.key] = v;
@@ -528,21 +628,26 @@ $('#result').addEventListener('change', e => {
   } else if (t.dataset.eprice) {
     if (v == null) delete eprices[t.dataset.eprice]; else eprices[t.dataset.eprice] = v;
     store.set(K.eprices, eprices);
-  } else return;
-  render();
+  }
+  renderKeepFocus();
 });
 $('#result').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('input.num')) e.target.blur(); });
 
 $('#btnSave').addEventListener('click', () => {
   const c = last; if (!c || !c.ready) return;
   const row = r => ({ id: r.id, icon: r.it.icon, name: r.it.ko, before: r.b, after: r.a, delta: r.delta, price: r.price, value: r.value });
-  const rec = {
-    id: uid(), date: Date.now(),
+  const body = {
     meso: { before: c.meso.before, after: c.meso.after, delta: c.meso.delta },
-    items: c.items.map(row),
+    items: c.items.filter(r => !r.unknown).map(row), // 개수를 모르는 물약은 기록하지 않는다
     etc: c.etc.filter(r => r.delta !== 0).map(row),
     itemValue: c.itemValue, etcValue: c.etcValue, net: c.net
   };
+  // 같은 결과를 두 번 저장하지 않는다
+  const sig = JSON.stringify(body);
+  if (history[0] && JSON.stringify({ meso: history[0].meso, items: history[0].items, etc: history[0].etc, itemValue: history[0].itemValue, etcValue: history[0].etcValue, net: history[0].net }) === sig) {
+    toast('방금 저장한 결과와 같아요. 이미 기록에 있어요.'); return;
+  }
+  const rec = { id: uid(), date: Date.now(), ...body };
   history.unshift(rec);
   if (!store.set(K.hist, history)) { history.shift(); toast('저장 공간이 가득 찼어요. 오래된 기록을 지워 주세요.'); return; }
   renderHistory();
@@ -552,7 +657,9 @@ $('#btnSave').addEventListener('click', () => {
 
 $('#btnReset').addEventListener('click', () => {
   if (!confirm('올린 사진과 고친 숫자를 모두 지우고 새로 시작할까요? (저장한 기록은 남아요)')) return;
-  cur = empty(); results.clear(); saveCur(); setActive('before'); render();
+  generation++; // 아직 인식 중인 사진은 버린다
+  for (const s of SIDES) cur[s].images.forEach(dropImage);
+  cur = empty(); results.clear(); pending.clear(); saveCur(); setActive('before'); render();
   scrollTo({ top: 0, behavior: 'smooth' });
 });
 
@@ -569,7 +676,9 @@ $('#btnClearHistory').addEventListener('click', () => {
 });
 
 /* ---------- 인식 결과 크게 보기 ---------- */
-async function openViewer(im) {
+let viewerOpener = null; // 닫으면 이 버튼으로 포커스를 돌려준다
+async function openViewer(im, opener) {
+  viewerOpener = opener || null;
   const r = results.get(im.id);
   const bmp = await createImageBitmap(im._blob || await (await fetch(im.dataURL)).blob());
   const s = bmp.width > 500 ? 1 : 2;
@@ -587,7 +696,11 @@ async function openViewer(im) {
   $('#viewer').hidden = false;
   $('#viewerClose').focus();
 }
-const closeViewer = () => { $('#viewer').hidden = true; };
+const closeViewer = () => {
+  $('#viewer').hidden = true;
+  if (viewerOpener && viewerOpener.isConnected) viewerOpener.focus();
+  viewerOpener = null;
+};
 $('#viewerClose').addEventListener('click', closeViewer);
 $('#viewer').addEventListener('click', e => { if (e.target.id === 'viewer') closeViewer(); });
 addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#viewer').hidden) closeViewer(); });
@@ -602,9 +715,16 @@ renderHistory();
   // 새로고침 전에 넣어 둔 사진: 저장해 둔 인식 결과를 그대로 쓰고, 인식 방식이 바뀌었으면 다시 인식
   // (저장하지 못한 큰 사진은 뺀다)
   for (const s of SIDES) cur[s].images = cur[s].images.filter(im => im.dataURL);
+  let redone = false;
   for (const s of SIDES) for (const im of cur[s].images) {
+    // 썸네일은 큰 data: 주소 대신 가벼운 blob: 주소로
+    if (!im._blob) try {
+      im._blob = await (await fetch(im.dataURL)).blob();
+      if (im._url && im._url.startsWith('data:')) im._url = null; // 처음 그릴 때 쓴 data: 주소는 버린다
+    } catch {}
     if (im.res && im.res.v === VERSION) results.set(im.id, im.res);
-    else await runAnalysis(im);
+    else { await runAnalysis(im); redone = true; }
   }
+  if (redone) saveCur(); // 다시 인식한 결과를 저장해 두어 다음 새로고침에는 바로 보이게
   render();
 })();
