@@ -519,11 +519,11 @@ initCursor();
 setActive(activeSide);
 render();
 renderHistory();
+templates(); // 아이콘을 미리 받아 둔다 (첫 사진을 넣을 때 기다리지 않도록)
 (async () => {
   for (const s of SIDES) for (const im of cur[s].images) await runAnalysis(im);
   let changed = false;
   for (const s of SIDES) for (const im of [...cur[s].images].reverse()) if (cur[s].images.includes(im) && replaceSameKind(s, im)) changed = true;
   if (changed) saveCur();
   render();
-  if (!cur.before.images.length) templates(); // 미리 준비
 })();

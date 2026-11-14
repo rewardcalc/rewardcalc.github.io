@@ -109,10 +109,10 @@ function colorBuckets(img, colors) {
 // icons: [{ key, url }] — key는 인식 결과에 그대로 돌려준다
 export async function loadTemplates(icons) {
   const load = async url => { try { return await pixelsFromSource(url); } catch (e) { return await pixelsFromSource(url + '?r=1'); } };
-  // 작은 이미지 100여 개를 4개씩 나눠 불러온다
+  // 작은 이미지 100여 개를 16개씩 동시에 불러온다
   const tIcons = [], digits = [];
-  for (let i = 0; i < icons.length; i += 4) {
-    const batch = await Promise.all(icons.slice(i, i + 4).map(async ic => makeTemplate(ic.key, await load(ic.url))));
+  for (let i = 0; i < icons.length; i += 16) {
+    const batch = await Promise.all(icons.slice(i, i + 16).map(async ic => makeTemplate(ic.key, await load(ic.url))));
     tIcons.push(...batch);
   }
   const icons_ = tIcons;
