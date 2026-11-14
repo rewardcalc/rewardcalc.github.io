@@ -203,10 +203,13 @@ function compute() {
     return { id, it, key, rb, ra, b, a, delta, price, value: delta * price, src: pc.src };
   });
 
-  // 기타 아이템은 사냥 전·후 모두 기타 창 사진이 있어야 비교할 수 있다
-  const etcState = A.before.hasEtc && A.after.hasEtc ? 'both' : (A.before.hasEtc || A.after.hasEtc) ? 'one' : 'none';
+  // 기타 아이템: 사냥 후 기타 창만 있어도 계산한다
+  //  both      : 사냥 전·후 모두 있음 → 개수 차이
+  //  afterOnly : 사냥 후만 있음 → 사냥 전 개수를 0으로 보고 사냥 후 개수 전체를 이번 사냥 수익으로 (사냥 전 칸은 직접 고칠 수 있음)
+  //  beforeOnly: 사냥 전만 있음 → 사냥 후 사진을 기다림
+  const etcState = A.after.hasEtc ? (A.before.hasEtc ? 'both' : 'afterOnly') : A.before.hasEtc ? 'beforeOnly' : 'none';
   let etc = [];
-  if (etcState === 'both') {
+  if (etcState === 'both' || etcState === 'afterOnly') {
     const eids = new Set([...A.before.etc.keys(), ...A.after.etc.keys(), ...editedIds('e:')]);
     etc = [...eids].filter(id => ETCI[id]).map(id => {
       const it = ETCI[id], key = 'e:' + id;
@@ -314,7 +317,7 @@ function renderResult(c) {
   $('#totals').innerHTML = `
     <div class="total"><div class="k">메소 변화</div><div class="v ${cls(c.meso.delta)}">${sfmt(c.meso.delta)}</div></div>
     <div class="total"><div class="k">물약 금액 변화</div><div class="v ${cls(c.itemValue)}">${sfmt(c.itemValue)}</div></div>
-    ${c.etcState === 'both' ? `<div class="total"><div class="k">기타 아이템 판매가 변화</div><div class="v ${cls(c.etcValue)}">${sfmt(c.etcValue)}</div></div>` : ''}
+    ${c.etcState === 'both' || c.etcState === 'afterOnly' ? `<div class="total"><div class="k">기타 아이템 판매가 변화</div><div class="v ${cls(c.etcValue)}">${sfmt(c.etcValue)}</div></div>` : ''}
     <div class="total main"><div class="k">순수익</div><div class="v ${cls(c.net)}">${c.net == null ? '메소를 못 읽었어요' : sfmt(c.net)}</div></div>`;
 
   const m = c.meso;
@@ -330,15 +333,16 @@ function renderResult(c) {
 
   // 기타 아이템 (몬스터 드랍)
   let etcHTML = '';
-  if (c.etcState === 'one') {
-    etcHTML = '<p class="hint">기타 창 사진을 사냥 전·후 모두 넣으면 몬스터가 드랍한 기타 아이템의 판매 수익도 계산해요.</p>';
-  } else if (c.etcState === 'both') {
+  if (c.etcState === 'beforeOnly') {
+    etcHTML = '<p class="hint">사냥 후 기타 창 사진을 넣으면 몬스터가 드랍한 기타 아이템의 판매 수익도 계산해요.</p>';
+  } else if (c.etcState === 'both' || c.etcState === 'afterOnly') {
     const changed = c.etc.filter(r => r.delta !== 0), same = c.etc.filter(r => r.delta === 0);
     const table = rs => `<div class="table-wrap"><table class="items">
         <thead><tr><th>아이템</th><th>사냥 전</th><th>사냥 후</th><th>변화</th><th>개당 판매가</th><th>금액</th></tr></thead>
         <tbody>${rs.map(r => rowHTML(r, etcImg(r.it), r.it.en, 'data-eprice', `NPC에게 팔면 개당 ${fmt(r.it.sell)}메소`)).join('')}</tbody></table></div>`;
     etcHTML = `<div class="etc">
       <h3 class="sub">기타 아이템 <small>몬스터 드랍 · NPC 판매가 기준</small></h3>
+      ${c.etcState === 'afterOnly' ? '<p class="hint" style="margin:0 0 8px">사냥 전 기타 창 사진이 없어서, 사냥 후 개수 전체를 이번 사냥에서 얻은 것으로 계산했어요. 원래 갖고 있던 아이템이 있으면 "사냥 전" 칸에 그 개수를 넣어 주세요.</p>' : ''}
       ${changed.length ? table(changed) : '<p class="hint">개수가 바뀐 기타 아이템이 없어요.</p>'}
       ${same.length ? `<details class="more"><summary>변화 없는 아이템 ${same.length}개 보기</summary>${table(same)}</details>` : ''}
     </div>`;
