@@ -20,6 +20,11 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
   raw(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch {} }
 };
+// 지금 올려 둔 사진은 sessionStorage: 새로고침하면 남고, 브라우저(탭)를 완전히 닫았다 열면 지워진다
+const sess = {
+  get(k, d) { try { const v = sessionStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } }
+};
 const K = { cur: 'pmt2.current', hist: 'pmt2.history', prices: 'pmt2.prices', eprices: 'pmt2.etcPrices', theme: 'pmt2.theme', guide: 'pmt2.guideSeen' };
 
 /* ---------- 아이템 데이터 ---------- */
@@ -41,7 +46,8 @@ const etcImg = it => `assets/etc/${it.icon}.png`;
 
 /* ---------- 상태 ---------- */
 const empty = () => ({ before: { images: [] }, after: { images: [] }, edits: { before: {}, after: {} } });
-let cur = store.get(K.cur, null) || empty();
+store.raw(K.cur, null); // 예전 버전이 localStorage에 남긴 사진 정리
+let cur = sess.get(K.cur, null) || empty();
 cur.edits ||= { before: {}, after: {} };
 let history = store.get(K.hist, []);
 let prices = store.get(K.prices, {});
@@ -53,9 +59,9 @@ const templates = () => (tplPromise ||= loadTemplates(TEMPLATE_LIST));
 let activeSide = cur.before.images.length ? 'after' : 'before';
 
 function saveCur() {
-  if (!store.set(K.cur, cur)) {
+  if (!sess.set(K.cur, cur)) {
     // 사진이 너무 크면 사진은 빼고 저장 (새로고침하면 다시 올려야 함)
-    store.set(K.cur, { ...cur, before: { images: [] }, after: { images: [] } });
+    sess.set(K.cur, { ...cur, before: { images: [] }, after: { images: [] } });
   }
 }
 

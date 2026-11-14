@@ -190,10 +190,14 @@ table.items { width: 100%; border-collapse: collapse; font-variant-numeric: tabu
 .item-name .ic img { image-rendering: pixelated; max-width: 40px; max-height: 40px; }
 .item-name small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
 .tag { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
-.num { width: 92px; padding: 5px 8px; border: 1px solid transparent; border-radius: 6px; text-align: right; background: transparent; font-variant-numeric: tabular-nums; }
-.num:hover { border-color: var(--line); }
-.num:focus { border-color: var(--accent); outline: none; background: var(--card); }
-.num.edited { background: var(--edit); border-color: var(--edit-line); }
+.edit-note { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 18px; padding: 10px 14px; border-radius: 10px; background: var(--card-2); border: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
+.edit-note svg { width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--accent); }
+.edit-note b { color: var(--text); }
+/* 고칠 수 있는 칸: 점선 밑줄로 표시 */
+.num { width: 92px; padding: 5px 8px; border: 1px solid transparent; border-bottom: 1px dashed var(--muted); border-radius: 6px 6px 0 0; text-align: right; background: transparent; font-variant-numeric: tabular-nums; }
+.num:hover { border-color: var(--line); border-radius: 6px; background: var(--card); }
+.num:focus { border-color: var(--accent); border-style: solid; border-radius: 6px; outline: none; background: var(--card); }
+.num.edited { background: var(--edit); border-color: var(--edit-line); border-style: solid; border-radius: 6px; }
 .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
 .etc { margin-top: 24px; }
 details.more { margin-top: 6px; }
