@@ -14,7 +14,7 @@ const CELL_BORDER = [0xCE, 0xC9, 0xBE]; // 인벤토리 칸 왼쪽/위쪽 테두
 const CELL_BG = [0xE1, 0xDF, 0xD5];     // 인벤토리 칸 바탕
 const CELL = 32;                        // 칸 크기
 // 인식 방식이 바뀌면 올린다 → 저장해 둔 인식 결과를 버리고 다시 인식
-export const VERSION = 3;
+export const VERSION = 4;
 
 // 메소 칸 숫자(굴림 11px) 모양
 const GULIM = {
@@ -168,12 +168,12 @@ export async function loadTemplates(icons, base = (typeof location !== 'undefine
     { key: 'coin', url: abs('assets/coin.png'), group: 'coin' },
     ...['normal', 'hover0', 'hover1', 'hover2', 'hover3', 'press', 'grab0', 'grab1', 'grab2'].map(c => ({ key: c, url: abs(`assets/cursor/${c}.png`), group: 'cursors' }))
   ];
-  const tpl = { icons: [], digits: [], coin: null, cursors: [] };
+  const tpl = { icons: [], digits: [], coin: null, cursors: [], missing: 0 }; // missing: 못 받은 아이콘 수
   for (let i = 0; i < list.length; i += 48) {
     // 아이템 아이콘 하나를 못 받으면 그 아이템만 빼고 계속한다 (숫자·동전·커서는 꼭 있어야 한다)
     const batch = await Promise.all(list.slice(i, i + 48).map(async e => {
       try { return { e, t: makeTemplate(e.key, await load(e.url)) }; }
-      catch (err) { if (e.group === 'icons') { console.warn('icon skipped', e.url); return null; } throw err; }
+      catch (err) { if (e.group === 'icons') { console.warn('icon skipped', e.url); tpl.missing++; return null; } throw err; }
     }));
     for (const b of batch) if (b) b.e.group === 'coin' ? (tpl.coin = b.t) : tpl[b.e.group].push(b.t);
   }
@@ -511,11 +511,12 @@ function findWarnings(ctx, tpl) {
 /* ---------- 선택된 탭 ---------- */
 // 인벤토리 창 위쪽 탭 줄(첫 칸보다 7~27px 위)에서 붉게 칠해진 탭 = 지금 보고 있는 탭
 // 탭은 왼쪽부터 장비·소비·설치·기타·캐시·꾸미기, 첫 칸 왼쪽 6px 앞에서 시작해 33px 간격
+// 칸이 4열 모두 보일 때만 믿는다: 첫 열이 잘리거나 가려지면 탭 위치가 한 칸씩 밀리기 때문
 const TABS = ['equip', 'use', 'setup', 'etc', 'cash', 'deco'];
 function activeTab(img, gb) {
   const { w, h, d } = img;
   const y0 = gb.y0 - 27, y1 = gb.y0 - 7;
-  if (y0 < 0) return null;
+  if (y0 < 0 || gb.x1 - gb.x0 < 36 * 3 + CELL - 2) return null; // 칸 간격 36px × 3 + 칸 32px
   const red = TABS.map((_, k) => {
     let n = 0;
     const xa = gb.x0 - 6 + 33 * k + 4, xb = xa + 25;
@@ -641,10 +642,11 @@ export function analyze(img, tpl, withWarn = true) {
   const nEtc = known.filter(k => String(k.icon).startsWith('e:')).length;
   const nUse = known.length - nEtc;
   let kind;
-  // 인벤토리 창은 위쪽의 선택된 탭(붉은색)으로 소비/기타를 정한다 → 텅 빈 창도 바르게 구분
-  // 탭을 못 찾으면 들어 있는 아이템으로 짐작하고, 아이템이 없으면 '모름'(사용자가 고르게)
+  // 인벤토리 창은 들어 있는 아이템으로 소비/기타를 정한다. 아는 아이템이 하나도 없을 때만 위쪽의 선택된 탭(붉은색)을 본다
+  // → 텅 빈 소비·기타 창도 구분하고, 장비 탭처럼 다른 탭이 찍힌 사진은 '모름'(tab에 어느 탭인지 남긴다)
   const tab = isInventory ? activeTab(img, gb) : null;
-  if (isInventory) kind = tab === 'use' || tab === 'etc' ? tab : tab ? 'unknown' : nEtc > nUse ? 'etc' : nUse ? 'use' : 'unknown';
+  const byTab = tab === 'use' || tab === 'etc' ? tab : null;
+  if (isInventory) kind = nEtc > nUse ? 'etc' : nUse > nEtc ? 'use' : nUse ? (byTab || 'use') : (byTab || 'unknown');
   else kind = nUse ? 'quick' : 'unknown';
   lap('quick');
 

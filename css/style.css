@@ -174,6 +174,7 @@ main > * { min-width: 0; }
 .total .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
 .total.main { background: var(--accent-soft); border-color: var(--accent-line); }
 .total.main .v { font-size: 26px; }
+.total .v.note { font-size: 14px; font-weight: 600; color: var(--muted); letter-spacing: 0; line-height: 1.45; padding-top: 4px; }
 .pos { color: var(--good); }
 .neg { color: var(--bad); }
 h3.sub { font-size: 15px; margin: 6px 0 4px; display: flex; align-items: baseline; gap: 8px; }
@@ -185,6 +186,11 @@ table.items { width: 100%; border-collapse: collapse; font-variant-numeric: tabu
 .items th:first-child, .items td:first-child { text-align: left; }
 .items td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
 .items tr.meso-row td { background: var(--card-2); }
+/* 안내 문장 줄은 줄바꿈을 허용한다 (한 줄로 두면 표 전체가 그 길이만큼 넓어진다) */
+.items td.empty { white-space: normal; }
+/* 표가 화면보다 넓어 옆으로 밀 때도 아이템 이름 열은 제자리에 남는다 */
+.items th:first-child, .items td:first-child:not(.empty) { position: sticky; left: 0; z-index: 1; background: var(--card); }
+.items tr.meso-row td:first-child { background: var(--card-2); }
 .item-name { display: flex; align-items: center; gap: 10px; font-weight: 600; }
 .item-name .ic { width: 40px; height: 40px; display: grid; place-items: center; flex: none; }
 .item-name .ic img { image-rendering: pixelated; max-width: 40px; max-height: 40px; }
@@ -217,6 +223,13 @@ details.more summary { color: var(--muted); font-size: 13.5px; padding: 6px 0; }
 .rec .net { font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; text-align: right; }
 .rec .net small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
 .rec .body { padding: 6px 14px 14px; }
+@media (max-width: 720px) {
+  .items th, .items td { padding-left: 5px; padding-right: 5px; }
+  .items td:first-child:not(.empty) { white-space: normal; min-width: 108px; max-width: 136px; }
+  .item-name { gap: 6px; word-break: keep-all; }
+  .item-name .ic { width: 34px; }
+  .num { width: 70px; padding: 5px 4px; }
+}
 @media (max-width: 640px) {
   .rec > summary { grid-template-columns: 1fr auto; }
   .rec .used { grid-column: 1 / -1; order: 3; }

@@ -7,7 +7,8 @@ import { loadTemplates, processBlob } from './recognize.js';
 
 let tplPromise = null;
 // 아이콘을 못 받아 준비에 실패하면 기억하지 않고 다음 요청 때 다시 시도한다
-const templates = (icons, base) => (tplPromise ||= loadTemplates(icons, base).catch(err => { tplPromise = null; throw err; }));
+// 아이템 아이콘 몇 개를 못 받았을 때도 이번 분석만 그대로 하고, 다음 요청 때 다시 받는다
+const templates = (icons, base) => (tplPromise ||= loadTemplates(icons, base).then(t => { if (t.missing) tplPromise = null; return t; }, err => { tplPromise = null; throw err; }));
 
 self.onmessage = async e => {
   const m = e.data;

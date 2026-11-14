@@ -78,7 +78,7 @@ try {
 // 백그라운드 작업을 못 쓰는 브라우저에서는 화면 쪽에서 직접 분석
 let localTpl = null;
 async function analyzeHere(blob) {
-  localTpl ||= loadTemplates(ICON_URLS, location.href).catch(err => { localTpl = null; throw err; });
+  localTpl ||= loadTemplates(ICON_URLS, location.href).then(t => { if (t.missing) localTpl = null; return t; }, err => { localTpl = null; throw err; });
   return processBlob(blob, await localTpl);
 }
 function analyzeBlob(blob) {
@@ -160,51 +160,73 @@ function replaceSameKind(side, im) {
 function dropImage(im) { results.delete(im.id); if (im._url) { URL.revokeObjectURL(im._url); im._url = null; } }
 const thumbURL = im => im._url || (im._url = im._blob ? URL.createObjectURL(im._blob) : im.dataURL || '');
 
-// 사진이 바뀌면 그 쪽에서 그 사진으로 읽은 값을 직접 고쳐 둔 것은 지운다 (새 사진 값을 쓰도록)
-//  소비 창·퀵슬롯 → 물약 개수, 기타 창 → 기타 아이템 개수, 소비·기타 창 → 메소
-function clearEdits(side, kind) {
-  const ed = cur.edits[side]; let n = 0;
+// 직접 고친 숫자는 그 값을 읽어 온 사진이 바뀌었을 때만 지운다 (새 사진 값을 쓰도록)
+//  물약 개수 ← 소비 창·퀵슬롯 사진, 기타 아이템 개수 ← 기타 창 사진, 메소 ← 메소를 읽어 온 사진
+// sourcesOf로 바뀌기 전 상태를 적어 두고, 사진을 넣거나 뺀 뒤 dropStaleEdits에 넘긴다
+function sourcesOf(side, skip) {
+  const used = usedImages(side, skip);
+  const by = k => (used.find(im => kindOf(im) === k) || {}).id || null;
+  return { use: by('use'), quick: by('quick'), etc: by('etc'), meso: aggregate(side, skip).mesoFrom };
+}
+function dropStaleEdits(side, was) {
+  const now = sourcesOf(side), ed = cur.edits[side]; let n = 0;
   for (const key of Object.keys(ed)) {
-    const hit = key === 'meso' ? (kind === 'use' || kind === 'etc')
-      : key.startsWith('i:') ? (kind === 'use' || kind === 'quick')
-      : key.startsWith('e:') ? kind === 'etc' : false;
-    if (hit) { delete ed[key]; n++; }
+    const stale = key === 'meso' ? now.meso !== was.meso
+      : key.startsWith('i:') ? now.use !== was.use || now.quick !== was.quick
+      : key.startsWith('e:') ? now.etc !== was.etc : false;
+    if (stale) { delete ed[key]; n++; }
   }
   return n;
 }
+
+// 다른 탭(장비·설치·캐시 등)이 찍힌 인벤토리 사진이면 그 탭 이름
+const TAB_KO = { equip: '장비', setup: '설치', cash: '캐시', deco: '꾸미기' };
+const wrongTab = r => r && r.inventory && TAB_KO[r.tab] || '';
 
 let generation = 0; // [새로 시작]을 누르면 바뀐다 → 그 전에 넣던 사진은 버린다
 async function addFiles(side, files) {
   const list = [...files].filter(f => f.type && f.type.startsWith('image/'));
   if (!list.length) { toast('이미지 파일만 올릴 수 있어요.'); return; }
   setActive(side);
-  const gen = generation, msgs = [], added = [];
+  const gen = generation, msgs = [];
   let cleared = 0;
-  for (const f of list) {
+  // 넣은 순서(seq)는 넣는 순간에 한꺼번에 매긴다. 앞 사진의 인식이 끝나기를 기다리는 동안
+  // 다른 사진이 들어와도 "나중에 넣은 사진이 이긴다"가 지켜지도록
+  const added = list.map(f => ({ id: uid(), seq: nextSeq(), name: f.name || '붙여넣은 이미지', dataURL: null, kind: null, _blob: f }));
+  for (const entry of added) { cur[side].images.push(entry); pending.add(entry.id); }
+  for (const entry of added) {
     if (gen !== generation) return;
-    const entry = { id: uid(), seq: nextSeq(), name: f.name || '붙여넣은 이미지', dataURL: null, kind: null, _blob: f };
-    cur[side].images.push(entry); added.push(entry);
+    // 차례를 기다리는 동안 사진을 뺐으면 인식하지 않는다
+    if (!cur[side].images.includes(entry)) { pending.delete(entry.id); continue; }
     await runAnalysis(entry);
     // 인식하는 동안 사진을 빼거나 [새로 시작]을 눌렀으면 아무것도 하지 않는다
     if (gen !== generation || !cur[side].images.includes(entry)) { dropImage(entry); continue; }
     const kind = kindOf(entry);
-    if (kind !== 'unknown') cleared += clearEdits(side, kind);
-    if (replaceSameKind(side, entry)) msgs.push(cur[side].images.includes(entry)
+    const was = sourcesOf(side, entry); // 이 사진이 없었을 때의 상태
+    if (kind === 'unknown') {
+      // 인식하지 못한 사진은 가장 최근 것 한 장만 남긴다 (다시 넣을 때마다 쌓이지 않도록)
+      const old = cur[side].images.filter(x => x !== entry && !pending.has(x.id) && results.has(x.id) && kindOf(x) === 'unknown');
+      cur[side].images = cur[side].images.filter(x => !old.includes(x));
+      old.forEach(dropImage);
+    } else if (replaceSameKind(side, entry)) msgs.push(cur[side].images.includes(entry)
       ? `${SIDE_KO[side]} ${KIND_KO[kind]} 사진을 새 사진으로 바꿨어요.`
       : `${SIDE_KO[side]} ${KIND_KO[kind]} 사진은 더 나중에 넣은 사진을 쓸게요.`);
+    cleared += dropStaleEdits(side, was);
   }
   saveCur();
   render();
   const kept = added.filter(im => cur[side].images.includes(im));
-  if (!kept.length) return;
+  if (!kept.length) { if (msgs.length) toast(msgs[msgs.length - 1]); return; }
   // 가려진 곳이 있으면 아래에 잠시 빨간 알림
   const warned = kept.map(im => warnMessage(results.get(im.id))).find(Boolean);
-  const unknown = kept.filter(im => kindOf(im) === 'unknown');
-  if (warned) toast(warned, { warn: true, ms: 6000 });
-  else if (unknown.length) toast(results.get(unknown[0].id)?.error ? '이미지를 읽지 못했어요. 다른 파일로 다시 넣어 주세요.'
-    : results.get(unknown[0].id)?.inventory ? '인벤토리 창은 찾았는데 아는 아이템이 없어요. 사진 옆 목록에서 소비 창/기타 창을 골라 주세요.'
-    : '사진에서 인벤토리나 퀵슬롯을 찾지 못했어요. 게임 화면을 확대·축소 없이 원본 크기로 캡처해 주세요.', { warn: true, ms: 6000 });
-  else if (msgs.length) toast(msgs[msgs.length - 1] + (cleared ? ' 직접 고친 숫자는 새 사진 기준으로 되돌렸어요.' : ''));
+  const unknown = kept.find(im => kindOf(im) === 'unknown'), ur = unknown && results.get(unknown.id);
+  const reset = cleared ? ' 직접 고친 숫자는 새 사진 기준으로 되돌렸어요.' : '';
+  if (warned) toast(warned + reset, { warn: true, ms: 6000 });
+  else if (unknown) toast((ur?.error ? '이미지를 읽지 못했어요. 다른 파일로 다시 넣어 주세요.'
+    : wrongTab(ur) ? `인벤토리의 ${wrongTab(ur)} 탭이 찍혔어요. 소비 탭이나 기타 탭을 누르고 다시 캡처해 주세요.`
+    : ur?.inventory ? '인벤토리 창은 찾았는데 아는 아이템이 없어요. 사진 옆 목록에서 소비 창/기타 창을 골라 주세요.'
+    : '사진에서 인벤토리나 퀵슬롯을 찾지 못했어요. 게임 화면을 확대·축소 없이 원본 크기로 캡처해 주세요.') + reset, { warn: true, ms: 6000 });
+  else if (msgs.length) toast(msgs[msgs.length - 1] + reset);
   else if (cleared) toast('새 사진을 넣어서, 직접 고친 숫자는 새 사진 기준으로 되돌렸어요.');
   else if (side === 'before' && !cur.after.images.length) toast('사냥 전 사진을 넣었어요. 사냥이 끝나면 "사냥 후" 칸에 넣어 주세요.');
 }
@@ -235,24 +257,26 @@ async function runAnalysis(entry) {
 
 /* ---------- 한쪽(전/후) 합산 ---------- */
 // 같은 종류 사진이 여럿이면(종류를 손으로 바꾼 경우 등) 가장 나중에 넣은 것만 계산에 쓴다
-function usedImages(side) {
-  const best = {}, rest = [];
+// 종류를 모르는 사진(인식 실패, 다른 탭)은 계산에 쓰지 않는다
+// skip: 이 사진이 없다고 치고 고른다
+function usedImages(side, skip) {
+  const best = {};
   for (const im of cur[side].images) {
-    if (pending.has(im.id) || !results.get(im.id)) continue;
+    if (im === skip || pending.has(im.id) || !results.get(im.id)) continue;
     const k = kindOf(im);
-    if (k === 'unknown') { rest.push(im); continue; }
+    if (k === 'unknown') continue;
     if (!best[k] || seqOf(side, im) > seqOf(side, best[k])) best[k] = im;
   }
-  return [...Object.values(best), ...rest];
+  return Object.values(best);
 }
-function aggregate(side) {
-  let meso = null, mesoFromUse = false;
+function aggregate(side, skip) {
+  let meso = null, mesoFromUse = false, mesoFrom = null;
   const inv = new Map(), quick = new Map(), etc = new Map();
   let hasInv = false, hasEtc = false;
-  for (const im of usedImages(side)) {
+  for (const im of usedImages(side, skip)) {
     const r = results.get(im.id);
     const kind = kindOf(im);
-    if (r.meso != null && (meso == null || (kind === 'use' && !mesoFromUse))) { meso = r.meso; mesoFromUse = kind === 'use'; }
+    if (r.meso != null && (meso == null || (kind === 'use' && !mesoFromUse))) { meso = r.meso; mesoFromUse = kind === 'use'; mesoFrom = im.id; }
     if (kind === 'use') hasInv = true;
     if (kind === 'etc') hasEtc = true;
     for (const k of r.known) {
@@ -271,7 +295,8 @@ function aggregate(side) {
   const items = new Map(inv);
   for (const [id, n] of quick) items.set(id, n);
   // hasUse: 물약 개수를 알 수 있는 사진(소비 창 또는 퀵슬롯)이 있음
-  return { meso, inv, quick, items, etc, hasInv, hasUse: hasInv || quick.size > 0, hasEtc };
+  // mesoFrom: 메소를 읽어 온 사진, hasMesoShot: 메소 칸이 있는 사진(소비·기타 창)이 있음
+  return { meso, mesoFrom, inv, quick, items, etc, hasInv, hasUse: hasInv || quick.size > 0, hasEtc, hasMesoShot: hasInv || hasEtc };
 }
 
 // 한 아이템의 사냥 전·후 개수는 같은 기준으로 비교한다
@@ -366,9 +391,11 @@ function shotDescBase(im) {
   if (r.error) return { text: '이미지를 읽지 못했어요.', warn: true };
   const kind = kindOf(im);
   const meso = r.meso != null ? ` · 메소 ${fmt(r.meso)}` : '';
-  const nUse = new Set(r.known.filter(k => k.icon.startsWith('u:')).map(k => ICON[k.icon].id)).size;
-  const nEtc = new Set(r.known.filter(k => k.icon.startsWith('e:')).map(k => ICON[k.icon].id)).size;
-  if (kind === 'unknown') return { text: '아는 아이템을 찾지 못했어요. 원본 크기로 캡처했는지 확인해 주세요.', warn: true };
+  const kinds = p => new Set(r.known.filter(k => k.icon.startsWith(p) && ICON[k.icon]).map(k => ICON[k.icon].id)).size;
+  const nUse = kinds('u:'), nEtc = kinds('e:');
+  if (kind === 'unknown') return { text: wrongTab(r) ? `${wrongTab(r)} 탭이 찍혔어요. 소비 탭이나 기타 탭을 누르고 다시 캡처해 주세요.`
+    : r.inventory ? '아는 아이템이 없어요. 소비 창인지 기타 창인지 골라 주세요.'
+    : '아는 아이템을 찾지 못했어요. 원본 크기로 캡처했는지 확인해 주세요.', warn: true };
   if (kind === 'etc') return { text: `몬스터 드랍 아이템 ${nEtc}종${meso}` };
   if (kind === 'quick') return { text: `물약 ${nUse}종` };
   const nQuick = new Set((r.quick || []).map(k => ICON[k.icon] && ICON[k.icon].id).filter(Boolean)).size;
@@ -428,7 +455,13 @@ function rowHTML(r, img, sub, priceAttr, priceTitle) {
     <td>${numInput('after', r.key, r.a, r.ra, r.it.ko)}</td>
     <td class="${cls(r.delta)}"><b>${r.delta == null ? '?' : sfmt(r.delta)}</b></td>
     <td><input class="num" type="text" inputmode="numeric" maxlength="13" ${priceAttr}="${r.id}" value="${fmt(r.price)}" title="${esc(priceTitle)}" aria-label="${esc(r.it.ko)} 개당 가격"></td>
-    <td class="${cls(r.value)}">${sfmt(r.value)}</td></tr>`;
+    <td class="${cls(r.value)}">${r.delta == null ? '?' : sfmt(r.value)}</td></tr>`;
+}
+
+// 순수익을 못 내는 까닭: 메소를 모르는 쪽이 있다
+function noMesoText(c) {
+  return SIDES.filter(s => c.meso[s] == null)
+    .map(s => `${SIDE_KO[s]} ${c.A[s].hasMesoShot ? '메소를 읽지 못했어요' : '메소가 보이는 사진(소비·기타 창)이 없어요'}`).join(' · ') + '. 아래 메소 칸에 직접 넣어도 돼요.';
 }
 
 function renderResult(c) {
@@ -440,7 +473,7 @@ function renderResult(c) {
     <div class="total"><div class="k">메소 변화</div><div class="v ${cls(c.meso.delta)}">${sfmt(c.meso.delta)}</div></div>
     ${c.useReady ? `<div class="total"><div class="k">물약 금액 변화</div><div class="v ${cls(c.itemValue)}">${sfmt(c.itemValue)}</div></div>` : ''}
     ${c.etcState === 'both' || c.etcState === 'afterOnly' ? `<div class="total"><div class="k">기타 아이템 판매가 변화</div><div class="v ${cls(c.etcValue)}">${sfmt(c.etcValue)}</div></div>` : ''}
-    <div class="total main"><div class="k">순수익</div><div class="v ${cls(c.net)}">${c.net == null ? '메소를 못 읽었어요' : sfmt(c.net)}</div></div>`;
+    <div class="total main"><div class="k">순수익</div>${c.net == null ? `<div class="v note">${esc(noMesoText(c))}</div>` : `<div class="v ${cls(c.net)}">${sfmt(c.net)}</div>`}</div>`;
 
   const m = c.meso;
   const rows = [`<tr class="meso-row">
@@ -513,10 +546,8 @@ function renderHistory() {
   }).join('');
 }
 
-let last = null;
 function render() {
   const c = compute();
-  last = c;
   for (const s of SIDES) renderSide(s, c.A[s]);
   renderResult(c);
 }
@@ -537,7 +568,9 @@ function renderKeepFocus() {
     const sel = focusKey(document.activeElement);
     render();
     const el = sel && $(sel);
-    if (el && el !== document.activeElement) { el.focus(); if (el.select && el.tagName === 'INPUT') el.select(); }
+    if (!el || el === document.activeElement) return;
+    const fold = el.closest('details'); if (fold) fold.open = true; // 접힌 목록으로 옮겨 간 칸이면 펼쳐서 보여 준다
+    el.focus(); if (el.select && el.tagName === 'INPUT') el.select();
   }, 0);
 }
 
@@ -557,21 +590,21 @@ for (const side of SIDES) {
     const li = e.target.closest('.shot'); if (!li) return;
     const im = cur[side].images.find(x => x.id === li.dataset.id); if (!im) return;
     if (e.target.closest('.icon-btn')) {
-      const kind = kindOf(im);
+      const was = sourcesOf(side);
       cur[side].images = cur[side].images.filter(x => x !== im); dropImage(im);
-      if (kind !== 'unknown') clearEdits(side, kind);
+      const n = dropStaleEdits(side, was); // 계산에 쓰던 사진을 뺐을 때만 지워진다
       saveCur(); render();
+      if (n) toast('사진을 빼서, 그 사진 값을 직접 고친 숫자는 지웠어요.');
       $('.drop', card).focus(); // 지운 사진 자리 대신 올리기 칸으로
     } else if (e.target.closest('.thumb')) openViewer(im, e.target.closest('.thumb'));
   });
   $('.shots', card).addEventListener('change', e => {
     const li = e.target.closest('.shot'); if (!li || e.target.tagName !== 'SELECT') return;
     const im = cur[side].images.find(x => x.id === li.dataset.id); if (!im) return;
-    const before = kindOf(im);
+    const was = sourcesOf(side);
     im.kind = e.target.value || null;
     const after = kindOf(im);
-    if (before !== 'unknown') clearEdits(side, before);
-    if (after !== 'unknown') clearEdits(side, after);
+    dropStaleEdits(side, was);
     // 종류를 손으로 고쳐도 다른 사진은 지우지 않는다 (같은 종류가 둘이면 나중에 넣은 사진이 쓰인다)
     const dup = after !== 'unknown' && cur[side].images.some(x => x !== im && kindOf(x) === after);
     if (dup) toast(`${SIDE_KO[side]}에 ${KIND_KO[after]} 사진이 두 장이에요. 필요 없는 사진은 ✕로 빼 주세요.`, { warn: true, ms: 5000 });
@@ -602,8 +635,9 @@ async function pasteFromClipboard(side) {
 
 // Ctrl+V 붙여넣기 → 마지막으로 누른 쪽(처음엔 사냥 전)에 추가
 document.addEventListener('paste', e => {
-  if (e.target.closest && e.target.closest('input')) return;
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/'));
+  // 숫자 칸에 글자를 붙여넣는 것은 그대로 두고, 이미지뿐이면 숫자 칸에 커서가 있어도 사진으로 받는다
+  if (e.target.closest && e.target.closest('input') && (!files.length || e.clipboardData.getData('text'))) return;
   if (!files.length) return;
   e.preventDefault();
   addFiles(activeSide, files);
@@ -634,7 +668,9 @@ $('#result').addEventListener('change', e => {
 $('#result').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('input.num')) e.target.blur(); });
 
 $('#btnSave').addEventListener('click', () => {
-  const c = last; if (!c || !c.ready) return;
+  // 숫자를 고친 직후에는 화면을 조금 뒤에 다시 그리므로, 그려 둔 결과가 아니라 지금 값으로 새로 계산한다
+  if (pending.size) { toast('사진을 인식하는 중이에요. 끝난 뒤에 다시 눌러 주세요.', { warn: true }); return; }
+  const c = compute(); if (!c.ready) return;
   const row = r => ({ id: r.id, icon: r.it.icon, name: r.it.ko, before: r.b, after: r.a, delta: r.delta, price: r.price, value: r.value });
   const body = {
     meso: { before: c.meso.before, after: c.meso.after, delta: c.meso.delta },
@@ -680,7 +716,9 @@ let viewerOpener = null; // 닫으면 이 버튼으로 포커스를 돌려준다
 async function openViewer(im, opener) {
   viewerOpener = opener || null;
   const r = results.get(im.id);
-  const bmp = await createImageBitmap(im._blob || await (await fetch(im.dataURL)).blob());
+  let bmp;
+  try { bmp = await createImageBitmap(im._blob || await (await fetch(im.dataURL)).blob()); }
+  catch { toast('이 사진은 크게 볼 수 없어요. 이미지를 읽지 못했어요.', { warn: true }); return; }
   const s = bmp.width > 500 ? 1 : 2;
   const cv = $('#viewerCanvas'); cv.width = bmp.width * s; cv.height = bmp.height * s;
   const g = cv.getContext('2d'); g.imageSmoothingEnabled = false;
