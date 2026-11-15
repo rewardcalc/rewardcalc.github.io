@@ -410,6 +410,29 @@ function shotDescBase(im) {
   return { text: `물약 ${nUse}종${nQuick ? ` · 퀵슬롯 ${nQuick}종` : ''}${meso}` };
 }
 
+/* ---------- 사진을 올린 시각 ---------- */
+// 제목 옆에 그쪽에 마지막으로 사진을 넣은 시각을 보여 준다. 사냥 전에는 그때부터 지난 시간, 사냥 후에는 사냥 전 사진과의 간격.
+// seq는 "넣은 시각(ms) × 1000 + 순번"이라 넣은 시각을 되찾을 수 있다 (예전에 저장된 사진에는 seq가 없다)
+const lastShotAt = side => cur[side].images.reduce((t, im) => Math.max(t, im.seq ? Math.floor(im.seq / 1000) : 0), 0) || null;
+const clockOf = (t, now) => {
+  const d = new Date(t), h = d.getHours();
+  const day = d.toDateString() === new Date(now).toDateString() ? '' : `${d.getMonth() + 1}/${d.getDate()} `;
+  return `${day}${h < 12 ? '오전' : '오후'} ${h % 12 || 12}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+const spanOf = ms => { const m = Math.floor(ms / 60000); return m < 60 ? `${m}분` : `${Math.floor(m / 60)}시간${m % 60 ? ` ${m % 60}분` : ''}`; };
+function renderTimes() {
+  const now = Date.now(), b = lastShotAt('before'), a = lastShotAt('after');
+  const put = (side, text) => {
+    const el = $(`.side[data-side="${side}"] .shot-time`);
+    if (el.textContent !== text) el.textContent = text;
+    el.hidden = !text;
+  };
+  put('before', b ? `${clockOf(b, now)} · ${now - b < 60000 ? '방금' : spanOf(now - b) + ' 지남'}` : '');
+  put('after', a ? clockOf(a, now) + (b && a - b >= 60000 ? ` · 사냥 전보다 ${spanOf(a - b)} 뒤` : '') : '');
+}
+setInterval(renderTimes, 1000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) renderTimes(); });
+
 function renderSide(side, agg) {
   const card = $(`.side[data-side="${side}"]`);
   const imgs = cur[side].images;
@@ -558,6 +581,7 @@ function render() {
   const c = compute();
   for (const s of SIDES) renderSide(s, c.A[s]);
   renderResult(c);
+  renderTimes();
 }
 
 // 표를 다시 그려도 키보드 위치(포커스)를 잃지 않도록:
