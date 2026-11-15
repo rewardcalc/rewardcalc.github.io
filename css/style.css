@@ -261,3 +261,20 @@ details.more summary { color: var(--muted); font-size: 13.5px; padding: 6px 0; }
 html.game-cursor, html.game-cursor * { cursor: none !important; }
 html.game-cursor input:not([type="checkbox"]):not([type="file"]) { cursor: text !important; }
 #game-cursor { position: fixed; left: 0; top: 0; z-index: 9999; pointer-events: none; image-rendering: pixelated; will-change: transform; }
+
+/* ---------- 게임 글씨 (굴림이 있는 윈도우에서만: index.html에서 html에 gulim을 붙인다) ----------
+   굴림은 굵기 없이 쓰면 11~24px에서 게임처럼 점으로 또렷하게 나온다. 굵게 하면 뭉개지므로,
+   굵은 글씨는 게임처럼 같은 글자를 실제 픽셀 한 칸 옆에 한 번 더 찍어서 만든다.
+   --px는 실제 픽셀 한 칸의 길이 (index.html에서 화면 배율에 맞춰 넣는다. 두 칸으로 밀리면 획이 따로 떨어져 깨져 보인다).
+   굴림이 없는 기기는 위에 적힌 원래 글꼴·크기·굵기 그대로 나온다 */
+html.gulim { --bold: var(--px, 1px) 0 0 currentColor; }
+html.gulim body { font: 12px/1.6 "Gulim", "굴림", "Pretendard", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif; }
+html.gulim body * { font-size: 12px !important; font-weight: 400 !important; letter-spacing: 0 !important; }
+html.gulim kbd { font-family: inherit; }
+html.gulim :is(h1, h2, h3, b, strong, th, .step, .found .meso, .btn, .total .v, .item-name, .tag, .rec .net, #toast.warn) { text-shadow: var(--bold); }
+html.gulim :is(.shot-time, .found .meso small, .found .label, h3.sub small, .item-name small, .rec .net small) { text-shadow: none; }
+html.gulim .icon-btn, html.gulim .viewer-head h2 { font-size: 18px !important; }
+html.gulim .total .v { font-size: 22px !important; }
+html.gulim .top h1, html.gulim .total.main .v { font-size: 24px !important; }
+html.gulim .total .v.note { font-size: 12px !important; }
+@media (max-width: 520px) { html.gulim .top h1 { font-size: 22px !important; } }

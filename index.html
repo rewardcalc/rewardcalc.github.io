@@ -9,6 +9,21 @@
 <script>
   // 화면이 깜빡이지 않도록 테마를 먼저 적용
   try { const t = localStorage.getItem('pmt2.theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  // 굴림이 있는 윈도우에서는 게임과 같은 글씨로 보여 준다 (css/style.css의 "게임 글씨")
+  try {
+    const c = document.createElement('canvas').getContext('2d'), text = '가나다 0123 mmmm';
+    const wide = f => { c.font = '12px ' + f; return c.measureText(text).width; };
+    const has = ['monospace', 'serif'].some(f => wide('Gulim, ' + f) !== wide(f));
+    if (has && /Windows/.test(navigator.userAgent)) {
+      document.documentElement.classList.add('gulim');
+      // 굵은 글씨는 실제 픽셀 한 칸 옆에 한 번 더 찍는다. 화면 배율(윈도우 150%, 브라우저 확대)이 바뀌면 그 한 칸의 길이도 바뀐다
+      (function setPixel() {
+        const r = window.devicePixelRatio || 1;
+        document.documentElement.style.setProperty('--px', 1 / r + 'px');
+        matchMedia('(resolution: ' + r + 'dppx)').addEventListener('change', setPixel, { once: true });
+      })();
+    }
+  } catch (e) {}
 </script>
 <link rel="stylesheet" href="css/style.css">
 </head>
