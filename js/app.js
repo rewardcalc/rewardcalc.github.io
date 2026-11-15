@@ -104,11 +104,16 @@ function warnMessage(r) {
   if (w.items) parts.push(`아이템 ${w.items}개`);
   if (w.counts) parts.push(`아이템 개수 숫자 ${w.counts}곳`);
   if (w.meso) parts.push('메소 칸');
-  if (!parts.length && !w.cursor) return '';
+  // 캡처 범위가 인벤토리 칸을 잘랐을 때: 가려진 것과는 고치는 방법이 달라서 따로 말한다
+  const edge = w.clipped ? `인벤토리 가장자리가 잘려서 아이템 ${w.clipped}칸이 일부만 찍혔어요. 그 칸의 숫자가 틀릴 수 있으니 창 전체가 보이게 다시 캡처해 주세요.`
+    : w.cut ? '인벤토리 창이 일부만 찍혔어요. 안 찍힌 칸의 아이템은 세지 못하니 창 전체가 보이게 다시 캡처해 주세요.' : '';
+  // 창이 잘려서 메소 칸만 안 보이는 것이라면 잘렸다는 말 하나로 충분하다
+  if (edge && !w.cursor && parts.every(p => p === '메소 칸')) return edge;
+  if (!parts.length && !w.cursor) return edge;
   const who = w.cursor ? '마우스 커서가 인벤토리를 가리고 있어요' : '무언가에 가려서 읽지 못한 곳이 있어요';
   const what = parts.length ? ` (${parts.join(', ')})` : '';
   const fix = w.cursor ? '커서를 인벤토리 밖으로 옮기고' : '마우스 커서나 다른 창을 치우고';
-  return `${who}${what}. ${fix} 다시 캡처해 주세요.`;
+  return `${who}${what}. ${fix} 다시 캡처해 주세요.${edge ? ' ' + edge : ''}`;
 }
 
 /* ---------- 다크 모드 ---------- */
@@ -381,7 +386,10 @@ function shotDesc(im) {
   const side = SIDES.find(s => cur[s].images.includes(im));
   if (side && r && !pending.has(im.id) && kindOf(im) !== 'unknown' && !usedImages(side).includes(im))
     return { text: '같은 종류의 더 나중 사진을 쓰고 있어서 계산에 쓰지 않아요', warn: true };
-  if (!pending.has(im.id) && r && r.warn && Object.keys(r.warn).length && !d.warn) return { text: d.text + ' · 일부가 가려졌어요, 다시 캡처해 주세요', warn: true };
+  if (!pending.has(im.id) && r && r.warn && Object.keys(r.warn).length && !d.warn) {
+    const cutOnly = (r.warn.clipped || r.warn.cut) && Object.keys(r.warn).every(k => k === 'clipped' || k === 'cut' || k === 'meso');
+    return { text: d.text + (cutOnly ? ' · 가장자리가 잘렸어요, 다시 캡처해 주세요' : ' · 일부가 가려졌어요, 다시 캡처해 주세요'), warn: true };
+  }
   return d;
 }
 function shotDescBase(im) {

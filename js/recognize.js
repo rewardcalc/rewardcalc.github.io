@@ -13,8 +13,10 @@ const TOL = 10;                       // 색 허용 오차
 const CELL_BORDER = [0xCE, 0xC9, 0xBE]; // 인벤토리 칸 왼쪽/위쪽 테두리
 const CELL_BG = [0xE1, 0xDF, 0xD5];     // 인벤토리 칸 바탕
 const CELL = 32;                        // 칸 크기
+const GRID_COLS = 5, GRID_ROWS = 6;     // 인벤토리 창에 보이는 칸: 5열 × 6줄
+const MIN_VIS = 6;                      // 사진 끝에서 잘린 칸은 이만큼(픽셀)은 보여야 칸으로 친다
 // 인식 방식이 바뀌면 올린다 → 저장해 둔 인식 결과를 버리고 다시 인식
-export const VERSION = 5;
+export const VERSION = 6;
 
 // 메소 칸 숫자(굴림 11px) 모양
 const GULIM = {
@@ -384,9 +386,36 @@ function findGrid(img) {
     return out;
   };
   const X = fill(best.map(i => hx[i]), sx), Y = fill(best.map(i => hy[i]), sy);
+  // 사진 왼쪽·위쪽 끝에서 잘린 줄·열: 칸 테두리 선이 사진 밖에 있어서 모서리가 하나도 안 잡힌다.
+  // → 칸 간격만큼 바깥에 한 줄(열)이 더 있다고 보고, 보이는 부분에 이웃 테두리 선이 이어져 있으면 칸으로 친다.
+  //   (오른쪽·아래쪽에서 잘린 칸은 모서리가 보여서 이미 X·Y에 들어 있다)
+  const lineOk = (ax, ay, dx, dy) => {
+    let n = 0, b = 0;
+    // 왼쪽 테두리 선의 아래쪽은 개수 숫자가 덮으므로(숫자는 칸 왼쪽 끝에서 시작) 그 위쪽만 본다
+    for (let k = 0; k < (dy ? 19 : CELL); k++) {
+      const xx = ax + dx * k, yy = ay + dy * k;
+      if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+      n++; if (isB((yy * w + xx) * 4)) b++;
+    }
+    return n >= MIN_VIS && b >= n * 0.7;
+  };
+  const xc = X[0] - sx, yc = Y[0] - sy;
+  const rowsIn = Y.filter(y => y >= 0 && y < h), colsIn = X.filter(x => x >= 0 && x < w);
+  const addCol = X.length < GRID_COLS && xc < 0 && xc + CELL >= MIN_VIS && rowsIn.filter(y => lineOk(xc, y, 1, 0)).length >= Math.max(1, rowsIn.length / 2);
+  const addRow = Y.length < GRID_ROWS && yc < 0 && yc + CELL >= MIN_VIS && colsIn.filter(x => lineOk(x, yc, 0, 1)).length >= Math.max(1, colsIn.length / 2);
+  if (addCol) X.unshift(xc);
+  if (addRow) Y.unshift(yc);
+  const visW = x => Math.min(x + CELL, w) - Math.max(x, 0), visH = y => Math.min(y + CELL, h) - Math.max(y, 0);
   const cells = []; let covered = 0;
+  const pad = { l: 0, t: 0, r: 0, b: 0 };
   for (const y of Y) for (const x of X) {
-    if (x + CELL > w || y + CELL > h) continue;
+    if (x < 0 || y < 0 || x + CELL > w || y + CELL > h) {
+      // 사진 끝에서 잘린 칸: 조금이라도 쓸 만큼 보이면 칸으로 치고, 사진 밖으로 나간 만큼을 적어 둔다
+      if (visW(x) < MIN_VIS || visH(y) < MIN_VIS) continue;
+      cells.push({ x, y, w: CELL, h: CELL, clipped: true, ...(hasFrame(img, x, y) ? { framed: true } : {}) });
+      pad.l = Math.max(pad.l, -x); pad.t = Math.max(pad.t, -y); pad.r = Math.max(pad.r, x + CELL - w); pad.b = Math.max(pad.b, y + CELL - h);
+      continue;
+    }
     let bgN = 0, border = 0;
     for (let yy = y; yy < y + CELL; yy += 2) for (let xx = x; xx < x + CELL; xx += 2) if (isG((yy * w + xx) * 4)) bgN++;
     for (let k = 0; k < CELL; k++) { if (isB(((y + k) * w + x) * 4)) border++; if (isB((y * w + x + k) * 4)) border++; }
@@ -397,7 +426,22 @@ function findGrid(img) {
   }
   if (!cells.length) return null;
   cells.covered = covered;
+  // 보이는 열·줄 수 (인벤토리는 5열 × 6줄: 모자라면 창이 일부만 찍힌 것)
+  cells.cols = X.filter(x => visW(x) >= MIN_VIS).length; cells.rows = Y.filter(y => visH(y) >= MIN_VIS).length;
+  if (pad.l || pad.t || pad.r || pad.b) cells.pad = pad;
   return cells;
+}
+// 잘린 칸이 사진 안에 다 들어오도록 둘레에 여백을 붙인 사진. 여백은 칸 바탕색으로 채우고 "안 보이는 곳"(ring)으로 표시한다.
+function padImage(img, pad) {
+  const w = img.w + pad.l + pad.r, h = img.h + pad.t + pad.b;
+  const d = new Uint8ClampedArray(w * h * 4), ring = new Uint8Array(w * h).fill(1);
+  for (let p = 0; p < w * h; p++) { d[p * 4] = CELL_BG[0]; d[p * 4 + 1] = CELL_BG[1]; d[p * 4 + 2] = CELL_BG[2]; d[p * 4 + 3] = 255; }
+  for (let y = 0; y < img.h; y++) {
+    const to = ((y + pad.t) * w + pad.l) * 4;
+    d.set(img.d.subarray(y * img.w * 4, (y + 1) * img.w * 4), to);
+    ring.fill(0, (y + pad.t) * w + pad.l, (y + pad.t) * w + pad.l + img.w);
+  }
+  return { img: { w, h, d }, ring };
 }
 
 /* ---------- 가려진 곳 찾기 ---------- */
@@ -506,6 +550,8 @@ function findWarnings(ctx, tpl) {
   if (!coin) warn.meso = 'hidden';                 // 동전·메소 칸이 안 보임
   else if (meso == null) warn.meso = 'unreadable';   // 메소 숫자를 못 읽음
   if (grid.covered) warn.covered = grid.covered;     // 칸 전체가 가려짐
+  // 인벤토리 창이 일부만 찍힘 (5열 × 6줄이 다 보이지 않음): 안 찍힌 칸의 아이템은 셀 수 없다
+  if ((grid.cols && grid.cols < GRID_COLS) || (grid.rows && grid.rows < GRID_ROWS)) warn.cut = true;
 
   // 인벤토리(+메소 칸) 위에 게임 커서가 있으면 그 자리는 "가려진 곳"으로 따로 표시
   const gx0 = Math.min(...grid.map(c => c.x)), gy0 = Math.min(...grid.map(c => c.y));
@@ -530,6 +576,9 @@ function findWarnings(ctx, tpl) {
   const taken = new Set(known.map(k => k.box));
   const content = grid.filter(c => taken.has(c) || cellHasContent(img, mask, c));
   const suspects = content.filter(c => !taken.has(c));
+  // 사진 끝에서 잘린 칸에 무언가 들어 있음: 읽기는 했어도 잘린 부분 때문에 틀릴 수 있다
+  const clippedN = content.filter(c => c.clipped).length;
+  if (clippedN) warn.clipped = clippedN;
   // 아는 아이템인데 아이콘 일부가 가려져서 못 알아본 칸 (기타 창이면 기타 아이템만, 소비 창이면 소비 아이템만 비교)
   const pool = tpl.icons.filter(t => String(t.key).startsWith('e:') === (kind === 'etc'));
   const hiddenItems = suspects.filter(c => partialIconIn(img, mask, hide, c, pool)).length;
@@ -584,19 +633,24 @@ function activeTab(img, gb) {
 
 /* ---------- 메소 ---------- */
 // near가 있으면 인벤토리 칸 바로 아래에 있는 동전만, 없으면 가장 아래쪽 동전
-function findCoin(img, coin, buckets, near) {
+// hidden: 사진 끝에서 잘려 안 보이는 곳 (동전이 조금 잘려도 보이는 부분으로 찾는다)
+function findCoin(img, coin, buckets, near, hidden = null) {
   const { w } = img;
   let best = null;
   for (const o of candidates(img, buckets, coin, coin)) {
     const x = o % w, y = (o / w) | 0;
     if (near && (x < near.x0 - 30 || x > near.x1 || y < near.y1 - 4 || y > near.y1 + 70)) continue;
-    if (score(img, null, coin, x, y, 0.95, false) >= 0.95 && (!best || y > best.y)) best = { x, y };
+    if (score(img, hidden, coin, x, y, 0.95, false) >= 0.95 && (!best || y > best.y)) best = { x, y };
   }
   return best;
 }
 const GLYPHS = Object.entries(GULIM).map(([ch, rows]) => ({ ch, w: rows[0].length, h: rows.length, rows }));
-function readMeso(img, coin) {
+// right: 사진에서 실제로 보이는 오른쪽 끝. 메소 숫자는 오른쪽 정렬이라(끝자리가 동전에서 157px) 거기까지 안 보이면
+//        뒷자리가 잘린 것이므로 읽지 않는다 (36,237이 3,623으로 읽히는 일을 막는다)
+const MESO_END = 157;
+function readMeso(img, coin, right = img.w) {
   const { w, h, d } = img;
+  if (right <= coin.x + MESO_END) return null;
   const y0 = Math.max(0, coin.y - 4), y1 = Math.min(h, coin.y + 18);
   const x0 = coin.x + 16, x1 = Math.min(w, coin.x + 175);
   const dark = (x, y) => { const i = (y * w + x) * 4; return d[i] < 60 && d[i + 1] < 60 && d[i + 2] < 60; };
@@ -637,14 +691,25 @@ function readMeso(img, coin) {
 export function analyze(img, tpl, withWarn = true) {
   const T = {}, now = () => performance.now(); let t = now();
   const lap = k => { const n = now(); T[k] = Math.round(n - t); t = n; };
+  const W0 = img.w, H0 = img.h;
+  let grid = findGrid(img), clip = null, unsure = 0;
+  // 사진 끝에서 잘린 칸이 있으면: 둘레에 여백을 붙여 잘린 칸도 사진 안에 들어오게 하고, 여백은 "안 보이는 곳"으로 친다.
+  // 아래 분석은 여백을 붙인 사진으로 하고, 돌려주는 위치만 원래 사진 기준으로 되돌린다.
+  if (grid && grid.pad) {
+    const { l, t: top } = grid.pad, padded = padImage(img, grid.pad);
+    const moved = grid.map(c => ({ ...c, x: c.x + l, y: c.y + top }));
+    moved.covered = grid.covered; moved.cols = grid.cols; moved.rows = grid.rows;
+    grid = moved; img = padded.img; clip = { ring: padded.ring, dx: l, dy: top };
+  }
+  lap('grid');
   const buckets = colorBuckets(img, tpl.colors); lap('buckets');
   const { runs, mask } = findDigits(img, tpl.digits, buckets); lap('digits');
-  const grid = findGrid(img); let unsure = 0;
   // 주황색 틀이 둘린 칸: 틀 자리는 비교에서 빼고, 틀 때문에 놓친 개수 숫자를 다시 찾는다
-  if (grid && grid.some(c => c.framed)) {
-    const ring = new Uint8Array(img.w * img.h), widest = rs => Math.max(0, ...rs.map(r => r.w)); unsure = 0;
-    for (const c of grid) if (c.framed) {
-      maskFrame(img, ring, c);
+  // 사진 끝에서 잘린 칸도 같은 방식: 잘려 나간 자리를 빼고 숫자를 다시 찾는다
+  if (grid && grid.some(c => c.framed || c.clipped)) {
+    const ring = clip ? clip.ring : new Uint8Array(img.w * img.h), widest = rs => Math.max(0, ...rs.map(r => r.w)); unsure = 0;
+    for (const c of grid) if (c.framed || c.clipped) {
+      if (c.framed) maskFrame(img, ring, c);
       // 틀을 빼고 읽은 숫자가 더 길 때만(= 앞자리가 틀에 덮였던 것) 바꾼다
       const old = runs.filter(r => r.x >= c.x - 2 && r.x <= c.x + 26 && r.y >= c.y + 10 && r.y <= c.y + 24);
       const again = framedDigits(img, ring, mask, c, tpl.digits);
@@ -652,16 +717,16 @@ export function analyze(img, tpl, withWarn = true) {
     }
     for (let p = 0; p < ring.length; p++) if (ring[p]) mask[p] = 1;
   }
-  lap('grid');
+  lap('frames');
   const isInventory = !!(grid && grid.length >= 4);
   let gb = null;
   if (isInventory) gb = {
     x0: Math.min(...grid.map(c => c.x)), y0: Math.min(...grid.map(c => c.y)),
     x1: Math.max(...grid.map(c => c.x + CELL)), y1: Math.max(...grid.map(c => c.y + CELL))
   };
-  const coin = findCoin(img, tpl.coin, buckets, gb); lap('coin');
+  const coin = findCoin(img, tpl.coin, buckets, gb, clip && clip.ring); lap('coin');
   const icons = findIcons(img, mask, tpl.icons, !isInventory, buckets); lap('icons');
-  const meso = coin ? readMeso(img, coin) : null;
+  const meso = coin ? readMeso(img, coin, clip ? clip.dx + W0 : img.w) : null;
 
   const usedRuns = new Set(), dys = {}, cellRuns = new Map();
   const runFor = (box, cell) => {
@@ -716,7 +781,10 @@ export function analyze(img, tpl, withWarn = true) {
 
   const dyKeys = Object.keys(dys);
   const digitDy = dyKeys.length ? +dyKeys.sort((a, b) => dys[b] - dys[a])[0] : null;
-  const result = { kind, tab, inventory: isInventory, meso, known, quick, coin, grid: isInventory ? grid : null, warn: {}, w: img.w, h: img.h, timings: T };
+  // 여백을 붙여 분석했으면 위치를 원래 사진 기준으로 되돌려서 돌려준다 (ctx는 여백을 붙인 사진 기준 그대로)
+  const back = b => clip ? { ...b, x: b.x - clip.dx, y: b.y - clip.dy } : b;
+  const out = list => clip ? list.map(k => ({ ...k, box: back(k.box) })) : list;
+  const result = { kind, tab, inventory: isInventory, meso, known: out(known), quick: out(quick), coin: coin && back(coin), grid: isInventory ? (clip ? grid.map(back) : grid) : null, warn: {}, w: W0, h: H0, timings: T };
   // 가려진 곳 검사에 필요한 것들 (화면 쪽으로는 보내지 않는다)
   Object.defineProperty(result, 'ctx', { value: { img, mask, grid: isInventory ? grid : null, known, coin, meso, kind, digitDy, cellRuns, unsure }, enumerable: false });
   if (withWarn) addWarnings(result, tpl);
